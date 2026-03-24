@@ -1,0 +1,723 @@
+module markdown_renderer
+
+import { MdBlockNode, MdInlineNode } from "./node.cxy"
+import { MdBlock, MdInline } from "./common.cxy"
+import { escapeHtml } from "stdlib/utils.cxy"
+
+
+// CSS class name constants
+pub const MK_DOCUMENT     = "mk-doc"
+pub const MK_H1           = "mk-h1"
+pub const MK_H2           = "mk-h2"
+pub const MK_H3           = "mk-h3"
+pub const MK_H4           = "mk-h4"
+pub const MK_H5           = "mk-h5"
+pub const MK_H6           = "mk-h6"
+pub const MK_P            = "mk-p"
+pub const MK_BLOCKQUOTE   = "mk-blockquote"
+pub const MK_CODE         = "mk-code"
+pub const MK_PRE          = "mk-pre"
+pub const MK_UL           = "mk-ul"
+pub const MK_OL           = "mk-ol"
+pub const MK_LI           = "mk-li"
+pub const MK_A            = "mk-a"
+pub const MK_IMG          = "mk-img"
+pub const MK_STRONG       = "mk-strong"
+pub const MK_EM           = "mk-em"
+pub const MK_DEL          = "mk-del"
+pub const MK_HR           = "mk-hr"
+pub const MK_TABLE        = "mk-table"
+pub const MK_THEAD        = "mk-thead"
+pub const MK_TBODY        = "mk-tbody"
+pub const MK_TR           = "mk-tr"
+pub const MK_TH           = "mk-th"
+pub const MK_TD           = "mk-td"
+
+pub class MdRenderer {
+    - _os: &OutputStream
+
+    func `init`(os: &OutputStream) {
+        _os = os
+    }
+
+    func render(doc: &const MdBlockNode) {
+        _os << "<div class=\""
+            << MK_DOCUMENT
+            << "\">\n"
+        for (const block: doc.blocks()) {
+            renderBlock(&block.0)
+        }
+        _os << "</div>\n"
+    }
+
+    // ------------------------------------------------------------------
+    // Block rendering
+    // ------------------------------------------------------------------
+
+    func renderBlock(node: &const MdBlockNode): void {
+        switch (node.kind()) {
+            case MdBlock.Document => {
+                for (const child: node.blocks())
+                    renderBlock(&child.0)
+            }
+            case MdBlock.Heading       => renderHeading(node)
+            case MdBlock.Paragraph     => renderParagraph(node)
+            case MdBlock.CodeBlock     => renderCodeBlock(node)
+            case MdBlock.Blockquote    => renderBlockquote(node)
+            case MdBlock.BulletList    => renderBulletList(node)
+            case MdBlock.OrderedList   => renderOrderedList(node)
+            case MdBlock.ListItem      => renderListItem(node)
+            case MdBlock.HorizontalRule => renderHr()
+            case MdBlock.Table         => renderTable(node)
+            case MdBlock.TableHead     => renderTableHead(node)
+            case MdBlock.TableBody     => renderTableBody(node)
+            case MdBlock.TableRow      => renderTableRow(node)
+            case MdBlock.TableCell     => renderTableCell(node)
+            case MdBlock.HtmlBlock     => renderHtmlBlock(node)
+            default => {}
+        }
+    }
+
+    func renderHeading(node: &const MdBlockNode): void {
+        var levelOpt = node.attr("level")
+        var level = !!levelOpt ? levelOpt&.getInt() : 1 as i64
+        var cls = ""
+        switch level {
+            1 => cls = MK_H1
+            2 => cls = MK_H2
+            3 => cls = MK_H3
+            4 => cls = MK_H4
+            5 => cls = MK_H5
+            ... => cls = MK_H6
+        }
+        _os << "<h"
+            << level
+            << " class=\""
+            << cls
+            << "\">"
+        for il: node.inlines() {
+            renderInline(&il.0)
+        }
+        _os << "</h"
+            << level
+            << ">\n"
+    }
+
+    func renderParagraph(node: &const MdBlockNode): void {
+        _os << "<p class=\""
+            << MK_P
+            << "\">"
+        for il: node.inlines() {
+            renderInline(&il.0)
+        }
+        _os << "</p>\n"
+    }
+
+    func renderCodeBlock(node: &const MdBlockNode): void {
+        var langOpt = node.attr("lang")
+        var lang = !!langOpt ? langOpt&.getString() : "".s
+        if (!lang.empty()) {
+            _os << "<pre class=\""
+                << MK_PRE
+                << " "
+                << MK_PRE
+                << "--"
+                << lang
+                << "\"><code class=\""
+                << MK_CODE
+                << " language-"
+                << lang
+                << "\">"
+        } else {
+            _os << "<pre class=\""
+                << MK_PRE
+                << "\"><code class=\""
+                << MK_CODE
+                << "\">"
+        }
+        for il: node.inlines() {
+            renderInlineRaw(&il.0)
+        }
+        _os << "</code></pre>\n"
+    }
+
+    func renderBlockquote(node: &const MdBlockNode): void {
+        _os << "<blockquote class=\""
+            << MK_BLOCKQUOTE
+            << "\">\n"
+        for block: node.blocks() {
+            renderBlock(&block.0)
+        }
+        _os << "</blockquote>\n"
+    }
+
+    func renderBulletList(node: &const MdBlockNode): void {
+        _os << "<ul class=\""
+            << MK_UL
+            << "\">\n"
+        for block: node.blocks() {
+            renderBlock(&block.0)
+        }
+        _os << "</ul>\n"
+    }
+
+    func renderOrderedList(node: &const MdBlockNode): void {
+        var startOpt = node.attr("start")
+        var start = !!startOpt ? startOpt&.getInt() : 1`i64
+        if (start != 1) {
+            _os << "<ol class=\""
+                << MK_OL
+                << "\" start=\""
+                << start
+                << "\">\n"
+        } else {
+            _os << "<ol class=\""
+                << MK_OL
+                << "\">\n"
+        }
+        for block: node.blocks() {
+            renderBlock(&block.0)
+        }
+        _os << "</ol>\n"
+    }
+
+    func renderListItem(node: &const MdBlockNode): void {
+        _os << "<li class=\""
+            << MK_LI
+            << "\">"
+        // If the item contains block children (loose list), render them as blocks.
+        // Otherwise render inlines directly (tight list).
+        if (!node.blocks().empty()) {
+            _os << "\n"
+            for block: node.blocks() {
+                renderBlock(&block.0)
+            }
+        } else {
+            for il: node.inlines() {
+                renderInline(&il.0)
+            }
+        }
+        _os << "</li>\n"
+    }
+
+    func renderHr(): void {
+        _os << "<hr class=\""
+            << MK_HR
+            << "\">\n"
+    }
+
+    func renderTable(node: &const MdBlockNode): void {
+        _os << "<table class=\""
+            << MK_TABLE
+            << "\">\n"
+        for block: node.blocks() {
+            renderBlock(&block.0)
+        }
+        _os << "</table>\n"
+    }
+
+    func renderTableHead(node: &const MdBlockNode): void {
+        _os << "<thead class=\""
+            << MK_THEAD
+            << "\">\n"
+        for block: node.blocks() {
+            renderBlock(&block.0)
+        }
+        _os << "</thead>\n"
+    }
+
+    func renderTableBody(node: &const MdBlockNode): void {
+        _os << "<tbody class=\""
+            << MK_TBODY
+            << "\">\n"
+        for block: node.blocks() {
+            renderBlock(&block.0)
+        }
+        _os << "</tbody>\n"
+    }
+
+    func renderTableRow(node: &const MdBlockNode): void {
+        _os << "<tr class=\""
+            << MK_TR
+            << "\">\n"
+        for block: node.blocks() {
+            renderBlock(&block.0)
+        }
+        _os << "</tr>\n"
+    }
+
+    func renderTableCell(node: &const MdBlockNode): void {
+        var isHeader = node.attr("header")
+        if (!!isHeader && isHeader&.getBool()) {
+            _os << "<th class=\""
+                << MK_TH
+                << "\">"
+            for il: node.inlines() {
+                renderInline(&il.0)
+            }
+            _os << "</th>\n"
+        } else {
+            _os << "<td class=\""
+                << MK_TD
+                << "\">"
+            for il: node.inlines() {
+                renderInline(&il.0)
+            }
+            _os << "</td>\n"
+        }
+    }
+
+    func renderHtmlBlock(node: &const MdBlockNode): void {
+        var rawOpt = node.attr("raw")
+        if (!!rawOpt)
+            _os << rawOpt << '\n'
+    }
+
+    // ------------------------------------------------------------------
+    // Inline rendering
+    // ------------------------------------------------------------------
+
+    func renderInline(node: &const MdInlineNode): void {
+        switch (node.kind()) {
+            case MdInline.Text => {
+                escapeHtml(_os, node.text())
+            }
+            case MdInline.SoftBreak => {
+                _os << '\n'
+            }
+            case MdInline.HardBreak => {
+                _os << "<br>\n"
+            }
+            case MdInline.Code => {
+                _os << "<code class=\""
+                    << MK_CODE
+                    << "\">"
+                escapeHtml(_os, node.text())
+                _os << "</code>"
+            }
+            case MdInline.Strong => {
+                _os << "<strong class=\""
+                    << MK_STRONG
+                    << "\">"
+                for child: node.children() {
+                    renderInline(&child.0)
+                }
+                _os << "</strong>"
+            }
+            case MdInline.Emphasis => {
+                _os << "<em class=\""
+                    << MK_EM
+                    << "\">"
+                for child: node.children() {
+                    renderInline(&child.0)
+                }
+                _os << "</em>"
+            }
+            case MdInline.StrongEmphasis => {
+                _os << "<strong class=\""
+                    << MK_STRONG
+                    << "\"><em class=\""
+                    << MK_EM
+                    << "\">"
+                for child: node.children() {
+                    renderInline(&child.0)
+                }
+                _os << "</em></strong>"
+            }
+            case MdInline.Strikethrough => {
+                _os << "<del class=\""
+                    << MK_DEL
+                    << "\">"
+                for child: node.children() {
+                    renderInline(&child.0)
+                }
+                _os << "</del>"
+            }
+            case MdInline.Link => {
+                var hrefOpt  = node.attr("href")
+                var titleOpt = node.attr("title")
+                if (!!titleOpt && !titleOpt&.getString().empty()) {
+                    _os << "<a class=\""
+                        << MK_A
+                        << "\" href=\""
+                        << hrefOpt&.getString()
+                        << "\" title=\""
+                        << titleOpt&.getString()
+                        << "\">"
+                } else {
+                    _os << "<a class=\""
+                        << MK_A
+                        << "\" href=\""
+                        << hrefOpt&.getString()
+                        << "\">"
+                }
+                for child: node.children() {
+                    renderInline(&child.0)
+                }
+                _os << "</a>"
+            }
+            case MdInline.Image => {
+                var src      = node.text()
+                var altOpt   = node.attr("alt")
+                var titleOpt = node.attr("title")
+                var alt   = !!altOpt   ? altOpt&.getString()   : "".s
+                if (!!titleOpt && !titleOpt&.getString().empty()) {
+                    _os << "<img class=\""
+                        << MK_IMG
+                        << "\" src=\""
+                        << src
+                        << "\" alt=\""
+                    escapeHtml(_os, alt)
+                    _os << "\" title=\""
+                        << titleOpt&.getString()
+                        << "\">"
+                } else {
+                    _os << "<img class=\""
+                        << MK_IMG
+                        << "\" src=\""
+                        << src
+                        << "\" alt=\""
+                        << alt
+                        << "\">"
+                }
+            }
+            case MdInline.RawHtml => {
+                var rawOpt = node.attr("raw")
+                if (rawOpt)
+                    _os << rawOpt&.getString()
+            }
+            default => {}
+        }
+    }
+
+    /// Render inline content verbatim (for code blocks — no span wrapping, only HTML escaping).
+    func renderInlineRaw(node: &const MdInlineNode): void {
+        escapeHtml(_os, node.text())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "renderer - render wraps in mk-doc div" {
+    var doc = MdBlockNode.document()
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.render(&doc)
+    ok!(out.startswith("<div class=\"mk-doc\">"))
+    ok!(out.endswith("</div>\n"))
+}
+
+test "renderer - heading h1" {
+    var node = MdBlockNode.heading(1)
+    node.addInline(MdInlineNode.text(String("Title")))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderBlock(&node)
+    ok!(out.contains("<h1"))
+    ok!(out.contains("mk-h1"))
+    ok!(out.contains("Title"))
+    ok!(out.contains("</h1>"))
+}
+
+test "renderer - heading h2" {
+    var node = MdBlockNode.heading(2)
+    node.addInline(MdInlineNode.text(String("Section")))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderBlock(&node)
+    ok!(out.contains("<h2"))
+    ok!(out.contains("mk-h2"))
+    ok!(out.contains("</h2>"))
+}
+
+test "renderer - heading h6" {
+    var node = MdBlockNode.heading(6)
+    node.addInline(MdInlineNode.text(String("Small")))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderBlock(&node)
+    ok!(out.contains("<h6"))
+    ok!(out.contains("mk-h6"))
+    ok!(out.contains("</h6>"))
+}
+
+test "renderer - paragraph" {
+    var node = MdBlockNode.paragraph()
+    node.addInline(MdInlineNode.text(String("Hello paragraph.")))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderBlock(&node)
+    ok!(out.contains("<p class=\"mk-p\">"))
+    ok!(out.contains("Hello paragraph."))
+    ok!(out.contains("</p>"))
+}
+
+test "renderer - code block with language" {
+    var node = MdBlockNode.codeBlock(String("rust"))
+    node.addInline(MdInlineNode.text(String("fn main() {}")))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderBlock(&node)
+    ok!(out.contains("mk-pre--rust"))
+    ok!(out.contains("language-rust"))
+    ok!(out.contains("fn main() {}"))
+    ok!(out.contains("</code></pre>"))
+}
+
+test "renderer - code block without language" {
+    var node = MdBlockNode.codeBlock()
+    node.addInline(MdInlineNode.text(String("plain code")))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderBlock(&node)
+    ok!(out.contains("<pre class=\"mk-pre\">"))
+    ok!(out.contains("<code class=\"mk-code\">"))
+    ok!(out.contains("plain code"))
+}
+
+test "renderer - horizontal rule" {
+    var node = MdBlockNode.hr()
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderBlock(&node)
+    ok!(out.contains("<hr class=\"mk-hr\">"))
+}
+
+test "renderer - bullet list with items" {
+    var list = MdBlockNode.bulletList()
+    var item1 = MdBlockNode.listItem()
+    item1.addInline(MdInlineNode.text(String("alpha")))
+    var item2 = MdBlockNode.listItem()
+    item2.addInline(MdInlineNode.text(String("beta")))
+    list.addBlock(&&item1)
+    list.addBlock(&&item2)
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderBlock(&list)
+    ok!(out.contains("<ul class=\"mk-ul\">"))
+    ok!(out.contains("<li class=\"mk-li\">"))
+    ok!(out.contains("alpha"))
+    ok!(out.contains("beta"))
+    ok!(out.contains("</ul>"))
+}
+
+test "renderer - ordered list default start has no start attribute" {
+    var list = MdBlockNode.orderedList(1)
+    var item = MdBlockNode.listItem()
+    item.addInline(MdInlineNode.text(String("first")))
+    list.addBlock(&&item)
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderBlock(&list)
+    ok!(out.contains("<ol class=\"mk-ol\">"))
+    ok!(!out.contains("start="))
+}
+
+test "renderer - ordered list non-1 start emits start attribute" {
+    var list = MdBlockNode.orderedList(3)
+    var item = MdBlockNode.listItem()
+    item.addInline(MdInlineNode.text(String("third")))
+    list.addBlock(&&item)
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderBlock(&list)
+    ok!(out.contains("start=\"3\""))
+}
+
+test "renderer - blockquote wraps children" {
+    var bq = MdBlockNode.blockquote()
+    var p = MdBlockNode.paragraph()
+    p.addInline(MdInlineNode.text(String("quoted")))
+    bq.addBlock(&&p)
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderBlock(&bq)
+    ok!(out.contains("<blockquote class=\"mk-blockquote\">"))
+    ok!(out.contains("<p class=\"mk-p\">"))
+    ok!(out.contains("quoted"))
+    ok!(out.contains("</blockquote>"))
+}
+
+test "renderer - table with thead and tbody" {
+    var table = MdBlockNode.table()
+    var head  = MdBlockNode.tableHead()
+    var hrow  = MdBlockNode.tableRow()
+    var hcell = MdBlockNode.tableCell(true)
+    hcell.addInline(MdInlineNode.text(String("Name")))
+    hrow.addBlock(&&hcell)
+    head.addBlock(&&hrow)
+    table.addBlock(&&head)
+    var body  = MdBlockNode.tableBody()
+    var brow  = MdBlockNode.tableRow()
+    var bcell = MdBlockNode.tableCell(false)
+    bcell.addInline(MdInlineNode.text(String("Alice")))
+    brow.addBlock(&&bcell)
+    body.addBlock(&&brow)
+    table.addBlock(&&body)
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderBlock(&table)
+    ok!(out.contains("<table class=\"mk-table\">"))
+    ok!(out.contains("<thead class=\"mk-thead\">"))
+    ok!(out.contains("<tbody class=\"mk-tbody\">"))
+    ok!(out.contains("<th class=\"mk-th\">"))
+    ok!(out.contains("<td class=\"mk-td\">"))
+    ok!(out.contains("Name"))
+    ok!(out.contains("Alice"))
+    ok!(out.contains("</table>"))
+}
+
+test "renderer - html block raw passthrough" {
+    var node = MdBlockNode.htmlBlock(String("<section>raw</section>"))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderBlock(&node)
+    ok!(out.contains("<section>raw</section>"))
+}
+
+test "renderer - inline text" {
+    var node = MdInlineNode.text(String("Hello!"))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderInline(&node)
+    ok!(out.contains("Hello!"))
+}
+
+test "renderer - inline text html escaping" {
+    var node = MdInlineNode.text(String("a < b & c > d"))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderInline(&node)
+    ok!(out.contains("&lt;"))
+    ok!(out.contains("&amp;"))
+    ok!(out.contains("&gt;"))
+    ok!(!out.contains(" < "))
+}
+
+test "renderer - inline code" {
+    var node = MdInlineNode.code(String("printf"))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderInline(&node)
+    ok!(out.contains("<code class=\"mk-code\">"))
+    ok!(out.contains("printf"))
+    ok!(out.contains("</code>"))
+}
+
+test "renderer - inline soft break" {
+    var node = MdInlineNode.softBreak()
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderInline(&node)
+    ok!(out.contains("\n"))
+}
+
+test "renderer - inline hard break" {
+    var node = MdInlineNode.hardBreak()
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderInline(&node)
+    ok!(out.contains("<br>"))
+}
+
+test "renderer - inline strong" {
+    var node = MdInlineNode(MdInline.Strong)
+    node.addChild(MdInlineNode.text(String("bold text")))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderInline(&node)
+    ok!(out.contains("<strong class=\"mk-strong\">"))
+    ok!(out.contains("bold text"))
+    ok!(out.contains("</strong>"))
+}
+
+test "renderer - inline emphasis" {
+    var node = MdInlineNode(MdInline.Emphasis)
+    node.addChild(MdInlineNode.text(String("italic text")))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderInline(&node)
+    ok!(out.contains("<em class=\"mk-em\">"))
+    ok!(out.contains("italic text"))
+    ok!(out.contains("</em>"))
+}
+
+test "renderer - inline strong emphasis" {
+    var node = MdInlineNode(MdInline.StrongEmphasis)
+    node.addChild(MdInlineNode.text(String("both")))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderInline(&node)
+    ok!(out.contains("<strong"))
+    ok!(out.contains("<em"))
+    ok!(out.contains("both"))
+    ok!(out.contains("</em></strong>"))
+}
+
+test "renderer - inline strikethrough" {
+    var node = MdInlineNode(MdInline.Strikethrough)
+    node.addChild(MdInlineNode.text(String("deleted")))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderInline(&node)
+    ok!(out.contains("<del class=\"mk-del\">"))
+    ok!(out.contains("deleted"))
+    ok!(out.contains("</del>"))
+}
+
+test "renderer - inline link without title" {
+    var node = MdInlineNode(MdInline.Link)
+    node.attr("href", String("https://example.com"))
+    node.addChild(MdInlineNode.text(String("click me")))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderInline(&node)
+    ok!(out.contains("<a class=\"mk-a\""))
+    ok!(out.contains("href=\"https://example.com\""))
+    ok!(out.contains("click me"))
+    ok!(out.contains("</a>"))
+    ok!(!out.contains("title="))
+}
+
+test "renderer - inline link with title" {
+    var node = MdInlineNode(MdInline.Link)
+    node.attr("href", String("https://example.com"))
+    node.attr("title", String("Visit site"))
+    node.addChild(MdInlineNode.text(String("link")))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderInline(&node)
+    ok!(out.contains("title=\"Visit site\""))
+    ok!(out.contains("href=\"https://example.com\""))
+}
+
+test "renderer - inline image without title" {
+    var node = MdInlineNode.image(String("photo.jpg"), String("a photo"))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderInline(&node)
+    ok!(out.contains("<img class=\"mk-img\""))
+    ok!(out.contains("src=\"photo.jpg\""))
+    ok!(out.contains("alt=\"a photo\""))
+    ok!(!out.contains("title="))
+}
+
+test "renderer - inline image with title" {
+    var node = MdInlineNode.image(String("logo.png"), String("logo"), String("Company Logo"))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderInline(&node)
+    ok!(out.contains("title=\"Company Logo\""))
+    ok!(out.contains("src=\"logo.png\""))
+}
+
+test "renderer - inline raw html passthrough" {
+    var node = MdInlineNode(MdInline.RawHtml)
+    node.attr("raw", String("<span class=\"x\">content</span>"))
+    var out = String()
+    var renderer = MdRenderer(&out)
+    renderer.renderInline(&node)
+    ok!(out.contains("<span class=\"x\">content</span>"))
+}

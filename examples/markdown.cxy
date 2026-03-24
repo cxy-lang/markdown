@@ -1,0 +1,67 @@
+import { Markdown, MarkdownConfig } from "../index.cxy"
+import { Path } from "stdlib/path.cxy"
+import { FileOutputStream } from "stdlib/os.cxy"
+
+func main(): !void {
+    println("=== Markdown Example ===\n")
+
+    // Example 1: String input → OutputStream
+    println("1. Rendering from string input:")
+    println("   Input: '# Hello **Markdown**'")
+    println("   Output:")
+    var md = Markdown()
+    md.toHtml(&stdout, "# Hello **Markdown**\n\nThis is a *test*.".s)
+    println()
+
+    // Example 2: Create a sample markdown file
+    println("2. Creating sample.md file...")
+    var sampleMd = """# Sample Document
+
+This document demonstrates **file input** rendering.
+
+## Features
+
+- Bullet lists
+- Code blocks
+- Links
+
+```rust
+fn main() {
+    println!("Code example");
+}
+```
+
+Visit [CXY](https://cxy-lang.org) for more info.
+"""
+    {
+        var fos = FileOutputStream.open("sample.md", false, O_WRONLY!|O_CREAT!|O_TRUNC!)
+        fos << sampleMd
+        println("   Created sample.md\n")
+    }
+
+    // Example 3: File input → OutputStream
+    println("3. Rendering from file input (sample.md):")
+    md.toHtml(&stdout, Path("sample.md"))
+    println()
+
+    // Example 4: Demonstrate caching
+    println("4. Demonstrating file-to-HTML caching:")
+
+    var config = MarkdownConfig{ cacheDir: Path("markdown-cache") }
+    var mdWithCache = Markdown(&&config)
+
+    println("   First render (creates cache)...")
+    var htmlPath1 = mdWithCache.toHtml(Path("sample.md"))
+    println(f"   Generated: {htmlPath1}")
+
+    println("   Second render (uses cache)...")
+    var htmlPath2 = mdWithCache.toHtml(Path("sample.md"))
+    println(f"   Returned:  {htmlPath2}")
+    println("   (Cache hit - no re-render needed)")
+
+    println("\n   Cache file content:")
+    md.toHtml(&stdout, htmlPath2)
+
+    println("\n=== Example Complete ===")
+    println("Tip: Check markdown-cache/sample.html for cached output")
+}

@@ -1,0 +1,333 @@
+module markdown
+
+import { MdParser } from "./internal/parser.cxy"
+import { MdRenderer } from "./internal/renderer.cxy"
+import { MdCache } from "./internal/cache.cxy"
+import { MarkdownError } from "./internal/common.cxy"
+import { Path, PathLike, cast, exists, isfile } from "stdlib/path.cxy"
+import { IOError, FileInputStream, FileOutputStream } from "stdlib/os.cxy"
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/// Options controlling how a Markdown instance behaves.
+pub struct MarkdownConfig {
+    /// Directory used for file→HTML cache output.
+    /// Defaults to ".markdown" relative to the working directory.
+    cacheDir: Path = Path(".markdown")
+
+    /// If true, the file→HTML overload always re-renders even when the
+    /// cached output is newer than the source.
+    noCache: bool = false
+
+    /// If true, file I/O is opened in non-blocking mode, suitable for use
+    /// inside coroutine or async contexts.
+    nonBlocking: bool = false
+}
+
+// ---------------------------------------------------------------------------
+// Markdown class
+// ---------------------------------------------------------------------------
+
+pub class Markdown {
+    - _config: MarkdownConfig
+    - _cache:  MdCache
+
+    func `init`() {
+        _config = MarkdownConfig{}
+        _cache  = MdCache(_config.cacheDir)
+    }
+
+    func `init`(config: MarkdownConfig) {
+        _config = &&config
+        _cache  = MdCache(_config.cacheDir)
+    }
+
+    @inline
+    const func config() => &_config
+
+    // -----------------------------------------------------------------------
+    // toHtml — string source → OutputStream
+    // -----------------------------------------------------------------------
+
+    /// Parse `source` as a markdown string and write the resulting HTML to `os`.
+    /// No caching — the string is always re-parsed.
+    ///
+    /// Example:
+    ///   var md = Markdown()
+    ///   md.toHtml(&response, "# Hello\nWorld".s)
+    func toHtml(os: &OutputStream, source: __string): !void {
+        var parser   = MdParser(source)
+        var doc      = parser.parse()
+        var renderer = MdRenderer(os)
+        renderer.render(&doc)
+    }
+
+    // -----------------------------------------------------------------------
+    // toHtml — file path → OutputStream
+    // -----------------------------------------------------------------------
+
+    /// Read the markdown file at `path`, parse it, and write the resulting HTML
+    /// to `os`. No caching — the file is always re-read and re-parsed.
+    ///
+    /// Example:
+    ///   md.toHtml(&response, Path("docs/guide.md"))
+    func toHtml(os: &OutputStream, path: PathLike): !void {
+        var spath = cast[__string](&path)
+        var fis   = FileInputStream.open(spath.str(), _config.nonBlocking)
+        var content = String()
+        fis.readAll(&content)
+        var parser   = MdParser(content.__str())
+        var doc      = parser.parse()
+        var renderer = MdRenderer(os)
+        renderer.render(&doc)
+    }
+
+    // -----------------------------------------------------------------------
+    // toHtml — file path → cached HTML file
+    // -----------------------------------------------------------------------
+
+    /// Convert a markdown file to an HTML file under the configured cache
+    /// directory. Returns the path of the generated (or already-cached) file.
+    ///
+    /// Caching: if `config.noCache` is false and the cached output exists and
+    /// is newer than the source, the cached path is returned immediately.
+    ///
+    /// Example:
+    ///   var htmlPath = md.toHtml(Path("docs/guide.md"))
+    ///   // => Path(".markdown/docs/guide.html")
+    func toHtml(path: PathLike): !Path {
+        var spath = cast[__string](&path)
+
+        // Fast path: cached output is still valid
+        if (!_config.noCache && _cache.isValid(spath)) {
+            return _cache.outputPath(spath)
+        }
+
+        // Ensure the output directory exists
+        _cache.ensureDir(spath)
+
+        var outPath = _cache.outputPath(spath)
+        var outStr  = outPath.__str()
+
+        // Open output file (truncate), stream rendered HTML directly into it.
+        // FileOutputStream IS an OutputStream so we pass it straight through.
+        var fos = FileOutputStream.open(
+            outStr.str(),
+            _config.nonBlocking,
+            O_WRONLY!|O_CREAT!|O_TRUNC!
+        )
+        toHtml(&fos, path)
+
+        return &&outPath
+    }
+
+
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "toHtml - heading" {
+    var md  = Markdown()
+    var out = String()
+    md.toHtml(&out, "# Hello World".s)
+    ok!(out.contains("<h1"))
+    ok!(out.contains("mk-h1"))
+    ok!(out.contains("Hello World"))
+    ok!(out.contains("</h1>"))
+}
+
+test "toHtml - paragraph" {
+    var md  = Markdown()
+    var out = String()
+    md.toHtml(&out, "Just a paragraph.".s)
+    ok!(out.contains("<p class=\"mk-p\">"))
+    ok!(out.contains("Just a paragraph."))
+    ok!(out.contains("</p>"))
+}
+
+test "toHtml - bold and italic" {
+    var md  = Markdown()
+    var out = String()
+    md.toHtml(&out, "**bold** and *italic*".s)
+    ok!(out.contains("<strong"))
+    ok!(out.contains("mk-strong"))
+    ok!(out.contains("<em"))
+    ok!(out.contains("mk-em"))
+}
+
+test "toHtml - inline code" {
+    var md  = Markdown()
+    var out = String()
+    md.toHtml(&out, "Use `printf` here".s)
+    ok!(out.contains("<code class=\"mk-code\">"))
+    ok!(out.contains("printf"))
+}
+
+test "toHtml - fenced code block" {
+    var md  = Markdown()
+    var out = String()
+    md.toHtml(&out, "```c\nint x = 1;\n```".s)
+    ok!(out.contains("<pre class=\"mk-pre mk-pre--c\">"))
+    ok!(out.contains("<code class=\"mk-code language-c\">"))
+    ok!(out.contains("int x = 1;"))
+}
+
+test "toHtml - unordered list" {
+    var md  = Markdown()
+    var out = String()
+    md.toHtml(&out, "- alpha\n- beta\n- gamma".s)
+    ok!(out.contains("<ul class=\"mk-ul\">"))
+    ok!(out.contains("<li class=\"mk-li\">"))
+    ok!(out.contains("alpha"))
+}
+
+test "toHtml - ordered list" {
+    var md  = Markdown()
+    var out = String()
+    md.toHtml(&out, "1. first\n2. second".s)
+    ok!(out.contains("<ol class=\"mk-ol\">"))
+    ok!(out.contains("<li class=\"mk-li\">"))
+    ok!(out.contains("first"))
+}
+
+test "toHtml - blockquote" {
+    var md  = Markdown()
+    var out = String()
+    md.toHtml(&out, "> a quoted line".s)
+    ok!(out.contains("<blockquote class=\"mk-blockquote\">"))
+    ok!(out.contains("a quoted line"))
+}
+
+test "toHtml - horizontal rule" {
+    var md  = Markdown()
+    var out = String()
+    md.toHtml(&out, "---".s)
+    ok!(out.contains("<hr class=\"mk-hr\">"))
+}
+
+test "toHtml - link" {
+    var md  = Markdown()
+    var out = String()
+    md.toHtml(&out, "[CXY](https://cxy-lang.org)".s)
+    ok!(out.contains("<a class=\"mk-a\""))
+    ok!(out.contains("href=\"https://cxy-lang.org\""))
+    ok!(out.contains("CXY"))
+}
+
+test "toHtml - image" {
+    var md  = Markdown()
+    var out = String()
+    md.toHtml(&out, "![logo](assets/logo.png)".s)
+    ok!(out.contains("<img class=\"mk-img\""))
+    ok!(out.contains("src=\"assets/logo.png\""))
+    ok!(out.contains("alt=\"logo\""))
+}
+
+test "toHtml - table" {
+    var md  = Markdown()
+    var input = """| Name | Age |
+|------|-----|
+| Alice | 30 |
+| Bob   | 25 |"""
+    var out = String()
+    md.toHtml(&out, __string(input))
+    ok!(out.contains("<table class=\"mk-table\">"))
+    ok!(out.contains("<thead class=\"mk-thead\">"))
+    ok!(out.contains("<tbody class=\"mk-tbody\">"))
+    ok!(out.contains("<th class=\"mk-th\">"))
+    ok!(out.contains("<td class=\"mk-td\">"))
+    ok!(out.contains("Alice"))
+}
+
+test "toHtml - html escaping in text" {
+    var md  = Markdown()
+    var out = String()
+    md.toHtml(&out, "a < b & c > d".s)
+    ok!(out.contains("&lt;"))
+    ok!(out.contains("&amp;"))
+    ok!(out.contains("&gt;"))
+}
+
+test "toHtml - wraps in mk-doc div" {
+    var md  = Markdown()
+    var out = String()
+    md.toHtml(&out, "hello".s)
+    ok!(out.startswith("<div class=\"mk-doc\">"))
+    ok!(out.endswith("</div>\n"))
+}
+
+test "toHtml - custom cache dir" {
+    var config = MarkdownConfig{ cacheDir: Path("/tmp/md-test-cache") }
+    var md     = Markdown(&&config)
+    ok!(md.config().cacheDir == "/tmp/md-test-cache")
+}
+
+test "toHtml - noCache flag" {
+    var config = MarkdownConfig{ noCache: true }
+    var md     = Markdown(&&config)
+    ok!(md.config().noCache == true)
+}
+
+test "toHtml - comprehensive document" {
+    var md = Markdown()
+    var input = """# Documentation
+
+This is a **comprehensive** test with *multiple* features.
+
+## Code Example
+
+Here's some `inline code` and a block:
+
+```rust
+fn main() {
+    println!("Hello");
+}
+```
+
+## Lists and Quotes
+
+- First item
+- Second item
+
+> A quoted paragraph with **bold** text.
+
+### Link Test
+
+Visit [the website](https://example.com) for more.
+
+---
+
+End of document."""
+
+    var expected = """<div class="mk-doc">
+<h1 class="mk-h1">Documentation</h1>
+<p class="mk-p">This is a <strong class="mk-strong">comprehensive</strong> test with <em class="mk-em">multiple</em> features.</p>
+<h2 class="mk-h2">Code Example</h2>
+<p class="mk-p">Here&#39;s some <code class="mk-code">inline code</code> and a block:</p>
+<pre class="mk-pre mk-pre--rust"><code class="mk-code language-rust">fn main() {
+    println!(&quot;Hello&quot;);
+}
+</code></pre>
+<h2 class="mk-h2">Lists and Quotes</h2>
+<ul class="mk-ul">
+<li class="mk-li">First item</li>
+<li class="mk-li">Second item</li>
+</ul>
+<blockquote class="mk-blockquote">
+<p class="mk-p">A quoted paragraph with <strong class="mk-strong">bold</strong> text.</p>
+</blockquote>
+<h3 class="mk-h3">Link Test</h3>
+<p class="mk-p">Visit <a class="mk-a" href="https://example.com">the website</a> for more.</p>
+<hr class="mk-hr">
+<p class="mk-p">End of document.</p>
+</div>
+"""
+
+    var out = String()
+    md.toHtml(&out, __string(input))
+    ok!(out == expected)
+}

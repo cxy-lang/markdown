@@ -1,0 +1,49 @@
+module markdown_common
+
+/// Error thrown during markdown parsing or rendering
+pub exception MarkdownError(
+    msg: String,
+    line: u64 = 0,
+    _msg: String = null) {
+    if (_msg == null) {
+        _msg = msg == null ? String("Markdown error") : &&msg
+        if (line > 0) {
+            _msg << " at line " << line
+        }
+    }
+    return _msg.str()
+}
+
+/// Block-level node kinds
+pub enum MdBlock {
+    Document,
+    Heading,       // h1..h6, level stored in attrs
+    Paragraph,
+    CodeBlock,     // fenced or indented, lang in attrs
+    Blockquote,
+    BulletList,
+    OrderedList,
+    ListItem,
+    HorizontalRule,
+    Table,
+    TableHead,
+    TableBody,
+    TableRow,
+    TableCell,     // header vs data stored in attrs
+    HtmlBlock,     // raw HTML passthrough
+}
+
+/// Inline node kinds
+pub enum MdInline {
+    Text,
+    SoftBreak,
+    HardBreak,
+    Strong,
+    Emphasis,
+    StrongEmphasis,
+    Code,          // inline code span
+    Link,          // href, title in attrs
+    Image,         // src, alt, title in attrs
+    Strikethrough,
+    RawHtml,       // inline raw HTML passthrough
+}

@@ -1,0 +1,290 @@
+module markdown_node
+
+import { Vector } from "stdlib/vector.cxy"
+import { HashMap } from "stdlib/hash.cxy"
+import { MdBlock, MdInline } from "./common.cxy"
+
+/// A typed attribute value — avoids converting numbers and booleans to strings.
+pub struct Attribute {
+    - _value: bool | i64 | String
+
+    func `init`(value: bool) {
+        _value = value
+    }
+
+    func `init`(value: i64) {
+        _value = value
+    }
+
+    func `init`(value: String) {
+        _value = &&value
+    }
+
+    /// Returns the string value, or "" for non-string attributes.
+    func getString(): __string {
+        match (_value) {
+            case String as val => return val.__str()
+            ...            => return "".s
+        }
+    }
+
+    /// Returns the boolean value.
+    /// Integers are truthy when non-zero; strings are always false.
+    func getBool(): bool {
+        match (_value) {
+            case bool as val => return val
+            case i64  as val => return val != 0
+            ...          => return false
+        }
+    }
+
+    /// Returns the integer value.
+    /// Booleans map to 1/0; strings return 0.
+    func getInt(): i64 {
+        match (_value) {
+            case i64  as val => return val
+            case bool as val => return val ? 1 : 0
+            ...          => return 0
+        }
+    }
+
+    @inline const func isBool()   => _value is #bool
+    @inline const func isInt()    => _value is #i64
+    @inline const func isString() => _value is #String
+}
+
+/// A single attribute map (href, src, alt, lang, level, etc.)
+pub type MdAttrs = HashMap[String, Attribute]
+
+/// An inline node — leaf-level content within a block
+pub class MdInlineNode {
+    - _kind: MdInline
+    - _text: String          // for Text, Code, RawHtml
+    - _children: Vector[MdInlineNode]
+    - _attrs: MdAttrs
+
+    func `init`(kind: MdInline) {
+        _kind = kind
+        _attrs = MdAttrs()
+        _children = Vector[MdInlineNode]()
+    }
+
+    func `init`(kind: MdInline, text: String) {
+        _kind = kind
+        _text = &&text
+        _attrs = MdAttrs()
+        _children = Vector[MdInlineNode]()
+    }
+
+    func `deinit`() {
+        _children.clear()
+        _attrs.clear()
+    }
+
+    @inline
+    const func kind() => _kind
+
+    @inline
+    const func text() => _text != null? _text.__str() : "".s
+
+    @inline
+    func attr(key: string, value: String) {
+        _attrs.insert(String(key), Attribute(&&value))
+    }
+
+    @inline
+    func attr(key: string, value: bool) {
+        _attrs.insert(String(key), Attribute(value))
+    }
+
+    @inline
+    func attr(key: string, value: i64) {
+        _attrs.insert(String(key), Attribute(value))
+    }
+
+    @inline
+    const func attr(key: string) {
+        return _attrs.[String(key)]
+    }
+
+    @inline
+    func addChild(child: MdInlineNode) {
+        _children.push(&&child)
+    }
+
+    @inline
+    const func children() => &_children
+
+    @inline
+    const func empty() {
+        if (_kind == MdInline.SoftBreak || _kind == MdInline.HardBreak || _kind == MdInline.RawHtml)
+            return false
+        return _children.empty() && (_text == null || _text.empty())
+    }
+
+    /// Convenience constructors
+    @[inline, static]
+    func text(s: String) => MdInlineNode(MdInline.Text, &&s)
+
+    @[inline, static]
+    func code(s: String) => MdInlineNode(MdInline.Code, &&s)
+
+    @[inline, static]
+    func softBreak() => MdInlineNode(MdInline.SoftBreak)
+
+    @[inline, static]
+    func hardBreak() => MdInlineNode(MdInline.HardBreak)
+
+    @[inline, static]
+    func link(href: String, title: String = null) {
+        var node = MdInlineNode(MdInline.Link)
+        node.attr("href", &&href)
+        if (title != null)
+            node.attr("title", &&title)
+        return &&node
+    }
+
+    @[inline, static]
+    func image(src: String, alt: String, title: String = null) {
+        var node = MdInlineNode(MdInline.Image, &&src)
+        node.attr("alt", &&alt)
+        if (title != null)
+            node.attr("title", &&title)
+        return &&node
+    }
+}
+
+/// A block node — top-level structural element of the document
+pub class MdBlockNode {
+    - _kind: MdBlock
+    - _children: Vector[MdBlockNode]   // nested blocks (blockquote, list, etc.)
+    - _inlines: Vector[MdInlineNode]   // inline content (paragraph, heading, cell)
+    - _attrs: MdAttrs
+
+    func `init`(kind: MdBlock) {
+        _kind = kind
+        _attrs = MdAttrs()
+        _children = Vector[MdBlockNode]()
+        _inlines = Vector[MdInlineNode]()
+    }
+
+    func `deinit`() {
+        _children.clear()
+        _inlines.clear()
+        _attrs.clear()
+    }
+
+    @inline
+    const func kind() => _kind
+
+    @inline
+    func attr(key: string, value: String) {
+        _attrs.insert(String(key), Attribute(&&value))
+    }
+
+    @inline
+    func attr(key: string, value: bool) {
+        _attrs.insert(String(key), Attribute(value))
+    }
+
+    @inline
+    func attr(key: string, value: i64) {
+        _attrs.insert(String(key), Attribute(value))
+    }
+
+    @inline
+    const func attr(key: string) => _attrs.[String(key)]
+
+    @inline
+    func addBlock(child: MdBlockNode) {
+        _children.push(&&child)
+    }
+
+    @inline
+    func addInline(node: MdInlineNode) {
+        _inlines.push(&&node)
+    }
+
+    /// Move an entire inline vector into this node, replacing any existing inlines.
+    /// Use this instead of addInline in a loop to avoid shallow-copy issues.
+    @inline
+    func setInlines(inlines: Vector[MdInlineNode]) {
+        _inlines = &&inlines
+    }
+
+    /// Move an entire block vector into this node, replacing any existing children.
+    @inline
+    func setBlocks(blocks: Vector[MdBlockNode]) {
+        _children = &&blocks
+    }
+
+    /// Drain and return the children vector, leaving this node with an empty children list.
+    @inline
+    func takeBlocks(): Vector[MdBlockNode] {
+        var blocks = &&_children
+        _children = Vector[MdBlockNode]()
+        return &&blocks
+    }
+
+    @inline
+    const func blocks() => &_children
+
+    @inline
+    const func inlines() => &_inlines
+
+    @inline
+    const func empty() => _children.empty() && _inlines.empty()
+
+    /// Convenience constructors
+
+    @static func document() => MdBlockNode(MdBlock.Document)
+
+    @static func heading(level: u32) {
+        var node = MdBlockNode(MdBlock.Heading)
+        node.attr("level", <i64>level)
+        return &&node
+    }
+
+    @static func paragraph() => MdBlockNode(MdBlock.Paragraph)
+
+    @static func codeBlock(lang: String = null) {
+        var node = MdBlockNode(MdBlock.CodeBlock)
+        if (lang != null && !lang.empty())
+            node.attr("lang", &&lang)
+        return &&node
+    }
+
+    @static func blockquote() => MdBlockNode(MdBlock.Blockquote)
+
+    @static func bulletList() => MdBlockNode(MdBlock.BulletList)
+
+    @static func orderedList(start: u32 = 1) {
+        var node = MdBlockNode(MdBlock.OrderedList)
+        node.attr("start", <i64>start)
+        return &&node
+    }
+
+    @static func listItem() => MdBlockNode(MdBlock.ListItem)
+
+    @static func hr() => MdBlockNode(MdBlock.HorizontalRule)
+
+    @static func table() => MdBlockNode(MdBlock.Table)
+
+    @static func tableHead() => MdBlockNode(MdBlock.TableHead)
+
+    @static func tableBody() => MdBlockNode(MdBlock.TableBody)
+
+    @static func tableRow() => MdBlockNode(MdBlock.TableRow)
+
+    @static func tableCell(header: bool = false) {
+        var node = MdBlockNode(MdBlock.TableCell)
+        node.attr("header", header)
+        return &&node
+    }
+
+    @static func htmlBlock(raw: String) {
+        var node = MdBlockNode(MdBlock.HtmlBlock)
+        node.attr("raw", &&raw)
+        return &&node
+    }
+}

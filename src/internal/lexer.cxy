@@ -1,0 +1,714 @@
+module markdown_lexer
+
+import { Vector } from "stdlib/vector.cxy"
+import { MarkdownError } from "./common.cxy"
+import { toLower } from "stdlib/utils.cxy"
+
+
+/// Block-level token kinds produced by the lexer.
+/// The lexer works line by line, classifying each line's role
+/// in the document structure. Inline content is left as raw text
+/// for the parser to process in a second pass.
+pub enum MdToken {
+    /// # Heading text  (level 1-6 stored alongside)
+    Heading,
+    /// Plain paragraph text line
+    Text,
+    /// Blank line (one or more consecutive empty lines)
+    Blank,
+    /// ``` or ~~~ fence open  (lang stored alongside)
+    FenceOpen,
+    /// ``` or ~~~ fence close
+    FenceClose,
+    /// A line inside a fenced code block (raw, no parsing)
+    CodeLine,
+    /// Indented code line (4 spaces or 1 tab)
+    IndentedCode,
+    /// > blockquote line  (stripped content stored alongside)
+    Blockquote,
+    /// - / * / + unordered list item  (content stored alongside)
+    BulletItem,
+    /// N. ordered list item  (start number and content stored alongside)
+    OrderedItem,
+    /// --- / *** / ___ horizontal rule
+    HorizontalRule,
+    /// | table row  (raw pipe-delimited content stored alongside)
+    TableRow,
+    /// |---|---| separator row (signals start of table body)
+    TableSep,
+    /// Raw HTML block open tag line
+    HtmlBlockOpen,
+    /// Line inside a raw HTML block
+    HtmlLine,
+    /// Raw HTML block close tag line
+    HtmlBlockClose,
+    /// Setext heading underline  (=== or ---, level stored alongside)
+    SetextUnderline,
+    EOF,
+}
+
+/// A single block-level token emitted by the lexer.
+pub struct MdLexToken {
+    kind: MdToken  = .EOF
+    /// Raw text content of the line (stripped of leading markers).
+    /// For Heading, the text without the leading # chars.
+    /// For BulletItem / OrderedItem, the item body.
+    /// For Blockquote, the content after '>'.
+    /// For CodeLine / IndentedCode, the raw code text.
+    /// For TableRow, the full pipe-delimited line.
+    text: __string = null
+    /// Auxiliary numeric value:
+    ///   Heading      -> heading level (1-6)
+    ///   OrderedItem  -> list start number
+    ///   SetextUnderline -> level (1 for '===', 2 for '---')
+    ///   otherwise 0
+    level: u32 = 0
+    /// Source line number (1-based) for error reporting.
+    line: u64 = 0
+}
+
+pub class MdLexer {
+    _input: __string
+    _pos: u64 = 0
+    _line: u64 = 1
+    _tokens = Vector[MdLexToken]()
+    _inFence: bool = false
+    _fenceFull: char = '\0' as char   // ` or ~
+    _fenceLen: u32 = 0
+    _inHtmlBlock: bool = false
+    _htmlCloseTag: String = null
+
+    func `init`(input: __string) {
+        _input = input
+    }
+
+    /// Tokenize the entire input and return the token list.
+    func tokenize(): !Vector[MdLexToken] {
+        while (!_isAtEnd()) {
+            const lineNo   = _line
+            var   raw      = _readLine()
+            _classifyLine(raw, lineNo)
+        }
+        _tokens.push(MdLexToken{
+            kind:  MdToken.EOF,
+            text:  null,
+            level: 0,
+            line:  _line
+        })
+        return &&_tokens
+    }
+
+    // ---------------------------------------------------------------
+    // Private helpers
+    // ---------------------------------------------------------------
+
+    func _isAtEnd() : bool => _pos >= _input.size()
+
+    /// Read until end-of-line (consuming the \n) and return the raw line
+    /// including any trailing \r but excluding the final \n.
+    func _readLine(): __string {
+        var start = _pos
+        while (_pos < _input.size() && _input.[<u32>_pos] != '\n' as char) {
+            _pos++
+        }
+        var end = _pos
+        // Remove trailing \r if present
+        if (end > start && _input.[<u32>(end - 1)] == '\r' as char)
+            end--
+        // Consume the \n
+        if (_pos < _input.size())
+            _pos++
+        _line++
+        return _input.substr(start, <i64>(end - start))
+    }
+
+    /// Emit a token.
+    func _emit(kind: MdToken, text: __string, level: u32, lineNo: u64) {
+        _tokens.push(MdLexToken{kind: kind, text: &&text, level: level, line: lineNo})
+    }
+
+    /// Main dispatcher: classify one raw line.
+    func _classifyLine(raw: __string, lineNo: u64): !void {
+        // --- Inside a fenced code block ---
+        if (_inFence) {
+            if (_isFenceClose(raw)) {
+                _inFence = false
+                _emit(MdToken.FenceClose, null, 0, lineNo)
+            } else {
+                _emit(MdToken.CodeLine, raw, 0, lineNo)
+            }
+            return
+        }
+
+        // --- Inside a raw HTML block ---
+        if (_inHtmlBlock) {
+            if (_htmlCloseTag != null && raw.contains(_htmlCloseTag.__str())) {
+                _emit(MdToken.HtmlLine, raw, 0, lineNo)
+                _emit(MdToken.HtmlBlockClose, null, 0, lineNo)
+                _inHtmlBlock = false
+                _htmlCloseTag = null
+            } else {
+                _emit(MdToken.HtmlLine, raw, 0, lineNo)
+            }
+            return
+        }
+
+        // --- Blank line ---
+        if (_isBlank(raw)) {
+            // Coalesce consecutive blank tokens
+            if (!_tokens.empty() && _tokens.[<i32>(_tokens.size() - 1)].kind != MdToken.Blank)
+                _emit(MdToken.Blank, null, 0, lineNo)
+            return
+        }
+
+        // --- ATX Heading:  # text ---
+        {
+            var level = _countLeading(raw, '#' as char)
+            if (level >= 1 && level <= 6) {
+                var rest = raw.substr(<u64>level)
+                if (rest.empty() || rest.[0] == ' ' as char || rest.[0] == '\t' as char) {
+                    var content = _trimHeading(rest)
+                    _emit(MdToken.Heading, content, level, lineNo)
+                    return
+                }
+            }
+        }
+
+        // --- Fenced code block open: ``` or ~~~ ---
+        {
+            var fc = _detectFence(raw)
+            if (fc.0 > 0) {
+                _inFence   = true
+                _fenceFull = fc.1
+                _fenceLen  = fc.0
+                _emit(MdToken.FenceOpen, fc.2, 0, lineNo)
+                return
+            }
+        }
+
+        // --- Horizontal rule: ---, ***, ___ (3+ chars, only that char + spaces) ---
+        if (_isHorizontalRule(raw)) {
+            _emit(MdToken.HorizontalRule, null, 0, lineNo)
+            return
+        }
+
+        // --- Blockquote: > content ---
+        if (!raw.empty() && raw.[0] == '>' as char) {
+            var content = raw.substr(1)
+            if (!content.empty() && content.[0] == ' ' as char)
+                content = content.substr(1)
+            _emit(MdToken.Blockquote, content, 0, lineNo)
+            return
+        }
+
+        // --- Unordered list item: - / * / + followed by space ---
+        {
+            var marker = _bulletMarker(raw)
+            if (marker != '\0' as char) {
+                var content = raw.substr(2)  // skip marker + space
+                _emit(MdToken.BulletItem, content, 0, lineNo)
+                return
+            }
+        }
+
+        // --- Ordered list item: digits followed by . or ) and space ---
+        {
+            var ol = _orderedMarker(raw)
+            if (ol.0 > 0) {
+                _emit(MdToken.OrderedItem, ol.1, ol.0, lineNo)
+                return
+            }
+        }
+
+        // --- Setext heading underline: === or --- on its own line ---
+        if (_isSetextUnderline(raw, '=' as char)) {
+            _emit(MdToken.SetextUnderline, null, 1, lineNo)
+            return
+        }
+        if (_isSetextUnderline(raw, '-' as char)) {
+            _emit(MdToken.SetextUnderline, null, 2, lineNo)
+            return
+        }
+
+        // --- Indented code block: 4 spaces or 1 tab ---
+        if (_isIndentedCode(raw)) {
+            var content = raw.substr(4)
+            _emit(MdToken.IndentedCode, content, 0, lineNo)
+            return
+        }
+
+        // --- Table row: starts and/or ends with | ---
+        if (_isTableRow(raw)) {
+            if (_isTableSep(raw))
+                _emit(MdToken.TableSep, raw, 0, lineNo)
+            else
+                _emit(MdToken.TableRow, raw, 0, lineNo)
+            return
+        }
+
+        // --- Raw HTML block: line starts with a block-level tag ---
+        {
+            var html = _detectHtmlBlock(raw)
+            if (html.0) {
+                _emit(MdToken.HtmlBlockOpen, raw, 0, lineNo)
+                if (html.1) {
+                    // Self-contained (close tag on same line)
+                    _emit(MdToken.HtmlBlockClose, null, 0, lineNo)
+                } else {
+                    _inHtmlBlock = true
+                    _htmlCloseTag = &&html.2
+                }
+                return
+            }
+        }
+
+        // --- Fallthrough: plain paragraph text ---
+        _emit(MdToken.Text, raw, 0, lineNo)
+    }
+
+    // ---------------------------------------------------------------
+    // Classification helpers
+    // ---------------------------------------------------------------
+
+    const func _isBlank(s: __string): bool {
+        for (const i: 0..s.size()) {
+            var c = s.[<u32>i]
+            if (c != ' ' as char && c != '\t' as char && c != '\r' as char)
+                return false
+        }
+        return true
+    }
+
+    /// Count leading occurrences of `ch` in s.
+    const func _countLeading(s: __string, ch: char): u32 {
+        var n = 0 as u32
+        while (n < s.size() && s.[n] == ch)
+            n++
+        return n
+    }
+
+    /// Strip trailing #+ and whitespace from ATX heading content.
+    const func _trimHeading(s: __string): __string {
+        var trimmed = s.trim()
+        // Remove trailing #s used as closing markers
+        var end = trimmed.size()
+        while (end > 0 && trimmed.[<u32>(end - 1)] == '#' as char)
+            end--
+        // Must be preceded by space to count as closing marker
+        if (end < trimmed.size() && end > 0 && trimmed.[<u32>(end - 1)] == ' ' as char) {
+            while (end > 0 && trimmed.[<u32>(end - 1)] == ' ' as char)
+                end--
+            trimmed = trimmed.substr(0, <i64>end)
+        }
+        return trimmed
+    }
+
+    /// Returns (fenceLen, fenceChar, lang) or (0, _, "") if not a fence.
+    const func _detectFence(s: __string): (u32, char, __string) {
+        var trimmed = s.trim()
+        if (trimmed.size() < 3)
+            return (0`u32, '\0' as char, "".s)
+        var ch = trimmed.[0]
+        if (ch != '`' as char && ch != '~' as char)
+            return (0`u32, '\0' as char, "".s)
+        var n = _countLeading(trimmed, ch)
+        if (n < 3)
+            return (0`u32, '\0' as char, "".s)
+        var lang = trimmed.substr(<u64>n).trim()
+        return (n, ch, lang)
+    }
+
+    const func _isFenceClose(s: __string): bool {
+        var trimmed = s.trim()
+        if (trimmed.size() < _fenceLen)
+            return false
+        var n = _countLeading(trimmed, _fenceFull)
+        return n >= _fenceLen && trimmed.substr(<u64>n).trim().empty()
+    }
+
+    const func _isHorizontalRule(s: __string): bool {
+        var trimmed = s.trim()
+        if (trimmed.size() < 3)
+            return false
+        var ch = trimmed.[0]
+        if (ch != '-' as char && ch != '*' as char && ch != '_' as char)
+            return false
+        var nonSpace = 0 as u32
+        for (const i: 0..trimmed.size()) {
+            var c = trimmed.[<u32>i]
+            if (c == ch)
+                nonSpace++
+            else if (c != ' ' as char && c != '\t' as char)
+                return false
+        }
+        return nonSpace >= 3
+    }
+
+    const func _bulletMarker(s: __string): char {
+        if (s.size() < 2)
+            return '\0' as char
+        var ch = s.[0]
+        if ((ch == '-' as char || ch == '*' as char || ch == '+' as char)
+             && s.[1] == ' ' as char)
+            return ch
+        return '\0' as char
+    }
+
+    /// Returns (start-number, content) or (0, "") if not an ordered item.
+    const func _orderedMarker(s: __string): (u32, __string) {
+        var i = 0 as u32
+        while (i < s.size() && s.[i] >= '0' as char && s.[i] <= '9' as char)
+            i++
+        if (i == 0 || i > 9)
+            return (0`u32, "".s)
+        var num = 0 as u32
+        for (const j: 0..i)
+            num = num * 10 + (s.[j] as u32 - <u32>'0')
+        if (i >= s.size())
+            return (0`u32, "".s)
+        var delim = s.[i]
+        if (delim != '.' as char && delim != ')' as char)
+            return (0`u32, "".s)
+        i++
+        if (i >= s.size() || s.[i] != ' ' as char)
+            return (0`u32, "".s)
+        i++
+        return (num, s.substr(<u64>i))
+    }
+
+    const func _isSetextUnderline(s: __string, ch: char): bool {
+        var trimmed = s.trim()
+        if (trimmed.size() < 2)
+            return false
+        for (const i: 0..trimmed.size()) {
+            if (trimmed.[<u32>i] != ch)
+                return false
+        }
+        return true
+    }
+
+    const func _isIndentedCode(s: __string): bool {
+        if (s.size() >= 4
+            && s.[0] == ' ' as char
+            && s.[1] == ' ' as char
+            && s.[2] == ' ' as char
+            && s.[3] == ' ' as char)
+            return true
+        if (!s.empty() && s.[0] == '\t' as char)
+            return true
+        return false
+    }
+
+    const func _isTableRow(s: __string): bool {
+        var trimmed = s.trim()
+        return !trimmed.empty()
+            && (trimmed.[0] == '|' as char || trimmed.[<u32>(trimmed.size() - 1)] == '|' as char)
+    }
+
+    const func _isTableSep(s: __string): bool {
+        var trimmed = s.trim()
+        for (const i: 0..trimmed.size()) {
+            var c = trimmed.[<u32>i]
+            if (c != '|' as char && c != '-' as char && c != ':' as char
+                && c != ' ' as char && c != '\t' as char)
+                return false
+        }
+        return true
+    }
+
+    /// Returns (isHtmlBlock, selfContained, expectedCloseTag).
+    const func _detectHtmlBlock(s: __string): (bool, bool, String) {
+        var trimmed = s.trim()
+        if (trimmed.size() < 2 || trimmed.[0] != '<' as char)
+            return (false, false, null as String)
+
+        // Block-level HTML tags (CommonMark spec §4.6 categories simplified)
+        const blockTags = [
+            "address", "article", "aside", "base", "basefont", "blockquote",
+            "body", "caption", "center", "col", "colgroup", "dd", "details",
+            "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption",
+            "figure", "footer", "form", "frame", "frameset", "h1", "h2", "h3",
+            "h4", "h5", "h6", "head", "header", "hr", "html", "iframe",
+            "legend", "li", "link", "main", "menu", "menuitem", "meta", "nav",
+            "noframes", "ol", "optgroup", "option", "p", "param", "search",
+            "section", "summary", "table", "tbody", "td", "tfoot", "th",
+            "thead", "title", "tr", "track", "ul"
+        ]
+
+        // Extract tag name
+        var i = 1 as u32
+        if (i < trimmed.size() && trimmed.[i] == '/' as char) {
+            i++
+        }
+        var tagStart = i
+        while (i < trimmed.size() && trimmed.[i] != '>' as char
+               && trimmed.[i] != ' ' as char && trimmed.[i] != '\t' as char
+               && trimmed.[i] != '/' as char) {
+            i++
+        }
+
+        var tagName = toLower(trimmed.substr(<u64>tagStart, <i64>(i - tagStart)))
+
+        var isBlock = false
+        for (const t: blockTags) {
+            if (tagName == t) {
+                isBlock = true
+                break
+            }
+        }
+        if (!isBlock)
+            return (false, false, null as String)
+
+        // Check if close tag is on the same line
+        var closeTag = f"</{tagName}>"
+        var selfContained = trimmed.contains(closeTag.__str())
+
+        return (true, selfContained, &&closeTag)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "lexer - eof on empty input" {
+    var lexer = MdLexer("")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.size() == 1)
+    ok!(tokens.[0].kind == MdToken.EOF)
+}
+
+test "lexer - atx heading level 1" {
+    var lexer = MdLexer("# Hello World")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.size() == 2)
+    ok!(tokens.[0].kind == MdToken.Heading)
+    ok!(tokens.[0].level == 1)
+    ok!(tokens.[0].text.contains("Hello World"))
+}
+
+test "lexer - atx heading level 3" {
+    var lexer = MdLexer("### Level Three")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.Heading)
+    ok!(tokens.[0].level == 3)
+    ok!(tokens.[0].text.contains("Level Three"))
+}
+
+test "lexer - atx heading level 6" {
+    var lexer = MdLexer("###### Six")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.Heading)
+    ok!(tokens.[0].level == 6)
+}
+
+test "lexer - atx heading with closing hashes stripped" {
+    var lexer = MdLexer("## Title ##")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.Heading)
+    ok!(tokens.[0].text.contains("Title"))
+    ok!(!tokens.[0].text.contains("##"))
+}
+
+test "lexer - plain text token" {
+    var lexer = MdLexer("just a plain line")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.Text)
+    ok!(tokens.[0].text.contains("just a plain line"))
+}
+
+test "lexer - blank line coalesced" {
+    var lexer = MdLexer("a\n\n\nb")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    // Text, Blank (coalesced), Text, EOF
+    ok!(tokens.size() == 4)
+    ok!(tokens.[0].kind == MdToken.Text)
+    ok!(tokens.[1].kind == MdToken.Blank)
+    ok!(tokens.[2].kind == MdToken.Text)
+    ok!(tokens.[3].kind == MdToken.EOF)
+}
+
+test "lexer - no double blank tokens" {
+    // Four blank lines between two text lines — still only one Blank token emitted
+    var lexer = MdLexer("a\n\n\n\n\nb")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    // Text, Blank (coalesced), Text, EOF
+    ok!(tokens.size() == 4)
+    ok!(tokens.[0].kind == MdToken.Text)
+    ok!(tokens.[1].kind == MdToken.Blank)
+    ok!(tokens.[2].kind == MdToken.Text)
+}
+
+test "lexer - fenced code block open with lang" {
+    var lexer = MdLexer("```python\nprint('hi')\n```")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.FenceOpen)
+    ok!(tokens.[0].text.contains("python"))
+    ok!(tokens.[1].kind == MdToken.CodeLine)
+    ok!(tokens.[1].text.contains("print('hi')"))
+    ok!(tokens.[2].kind == MdToken.FenceClose)
+}
+
+test "lexer - fenced code block open without lang" {
+    var lexer = MdLexer("```\ncode\n```")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.FenceOpen)
+    ok!(tokens.[1].kind == MdToken.CodeLine)
+    ok!(tokens.[2].kind == MdToken.FenceClose)
+}
+
+test "lexer - tilde fence" {
+    var lexer = MdLexer("~~~\ncode\n~~~")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.FenceOpen)
+    ok!(tokens.[1].kind == MdToken.CodeLine)
+    ok!(tokens.[2].kind == MdToken.FenceClose)
+}
+
+test "lexer - multiple code lines in fence" {
+    var lexer = MdLexer("```\nline1\nline2\nline3\n```")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.FenceOpen)
+    ok!(tokens.[1].kind == MdToken.CodeLine)
+    ok!(tokens.[2].kind == MdToken.CodeLine)
+    ok!(tokens.[3].kind == MdToken.CodeLine)
+    ok!(tokens.[4].kind == MdToken.FenceClose)
+}
+
+test "lexer - indented code 4 spaces" {
+    var lexer = MdLexer("    var x = 1")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.IndentedCode)
+    ok!(tokens.[0].text.contains("var x = 1"))
+}
+
+test "lexer - blockquote strips marker and space" {
+    var lexer = MdLexer("> quoted text")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.Blockquote)
+    ok!(tokens.[0].text.contains("quoted text"))
+    ok!(!tokens.[0].text.contains(">"))
+}
+
+test "lexer - bullet item dash" {
+    var lexer = MdLexer("- item one")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.BulletItem)
+    ok!(tokens.[0].text.contains("item one"))
+}
+
+test "lexer - bullet item star" {
+    var lexer = MdLexer("* item two")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.BulletItem)
+    ok!(tokens.[0].text.contains("item two"))
+}
+
+test "lexer - bullet item plus" {
+    var lexer = MdLexer("+ item three")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.BulletItem)
+    ok!(tokens.[0].text.contains("item three"))
+}
+
+test "lexer - ordered item dot delimiter" {
+    var lexer = MdLexer("3. third item")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.OrderedItem)
+    ok!(tokens.[0].level == 3)
+    ok!(tokens.[0].text.contains("third item"))
+}
+
+test "lexer - ordered item paren delimiter" {
+    var lexer = MdLexer("7) seventh item")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.OrderedItem)
+    ok!(tokens.[0].level == 7)
+    ok!(tokens.[0].text.contains("seventh item"))
+}
+
+test "lexer - horizontal rule dashes" {
+    var lexer = MdLexer("---")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.HorizontalRule)
+}
+
+test "lexer - horizontal rule stars" {
+    var lexer = MdLexer("***")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.HorizontalRule)
+}
+
+test "lexer - horizontal rule underscores" {
+    var lexer = MdLexer("___")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.HorizontalRule)
+}
+
+test "lexer - horizontal rule with spaces" {
+    var lexer = MdLexer("- - -")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.HorizontalRule)
+}
+
+test "lexer - table row" {
+    var lexer = MdLexer("| Name | Age |")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.TableRow)
+    ok!(tokens.[0].text.contains("Name"))
+    ok!(tokens.[0].text.contains("Age"))
+}
+
+test "lexer - table separator" {
+    var lexer = MdLexer("|------|-----|")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.TableSep)
+}
+
+test "lexer - table row then sep then row" {
+    var lexer = MdLexer("| A | B |\n|---|---|\n| 1 | 2 |")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.TableRow)
+    ok!(tokens.[1].kind == MdToken.TableSep)
+    ok!(tokens.[2].kind == MdToken.TableRow)
+}
+
+test "lexer - setext h1 underline equals" {
+    var lexer = MdLexer("Title\n=====")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.Text)
+    ok!(tokens.[1].kind == MdToken.SetextUnderline)
+    ok!(tokens.[1].level == 1)
+}
+
+test "lexer - setext h2 underline dashes" {
+    // Use exactly 2 dashes: passes _isSetextUnderline (size >= 2, all same char)
+    // but fails _isHorizontalRule (requires nonSpace >= 3), so it won't be
+    // misclassified as a HorizontalRule.
+    var lexer = MdLexer("Subtitle\n--")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.Text)
+    ok!(tokens.[1].kind == MdToken.SetextUnderline)
+    ok!(tokens.[1].level == 2)
+}
+
+test "lexer - line numbers are 1-based" {
+    var lexer = MdLexer("first\nsecond\nthird")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].line == 1)
+    ok!(tokens.[1].line == 2)
+    ok!(tokens.[2].line == 3)
+}
+
+test "lexer - html block open tag" {
+    var lexer = MdLexer("<div>\ncontent\n</div>")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.HtmlBlockOpen)
+}
+
+test "lexer - self-contained html block" {
+    var lexer = MdLexer("<p>inline content</p>")
+    var tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    ok!(tokens.[0].kind == MdToken.HtmlBlockOpen)
+    ok!(tokens.[1].kind == MdToken.HtmlBlockClose)
+}

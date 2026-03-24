@@ -9,3 +9,25 @@ dependencies: []
 
 tests:
   - file: "src/**/*.cxy"
+
+builds:
+  example-markdown:
+    entry: examples/markdown.cxy
+    output: markdown
+
+scripts:
+  build-examples:
+    inputs:
+      - examples/markdown.cxy
+      - src/**/*.cxy
+    outputs:
+      - "{{BUILD_DIR}}/markdown"
+    command: cxy package build example-markdown
+
+  run-examples:
+    depends: [build-examples]
+    command: |
+      (
+        cd {{BUILD_DIR}}
+        ./markdown
+      )

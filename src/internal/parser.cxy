@@ -1,0 +1,982 @@
+module markdown_parser
+
+import { Vector } from "stdlib/vector.cxy"
+import { split } from "stdlib/utils.cxy"
+import { MdLexer, MdLexToken, MdToken } from "./lexer.cxy"
+import { MdBlockNode, MdInlineNode } from "./node.cxy"
+import { MarkdownError, MdInline, MdBlock } from "./common.cxy"
+
+// -----------------------------------------------------------------------
+// Inline parser
+// Parses raw text into a sequence of MdInlineNode (spans).
+// -----------------------------------------------------------------------
+
+class InlineParser {
+    - _input: __string
+    - _pos: u64 = 0
+
+    func `init`(input: __string) {
+        _input = input
+    }
+
+    func parse(): !Vector[MdInlineNode] {
+        var nodes = Vector[MdInlineNode]()
+        while (!_isAtEnd()) {
+            var node = _next()
+            if (!node.empty())
+                nodes.push(&&node)
+        }
+        return &&nodes
+    }
+
+    - func _isAtEnd(): bool => _pos >= _input.size()
+
+    - func _peek(offset: u64 = 0): char {
+        var p = _pos + offset
+        if (p >= _input.size())
+            return '\0' as char
+        return _input.[<u32>p]
+    }
+
+    - func _advance(): char {
+        if (_isAtEnd()) return '\0' as char
+        var c = _input.[<u32>_pos]
+        _pos++
+        return c
+    }
+
+    - func _next(): !MdInlineNode {
+        var c = _peek()
+
+        // Hard line break: two or more spaces before newline
+        if (c == '\n' as char) {
+            _advance()
+            return MdInlineNode.softBreak()
+        }
+
+        // Inline code span: `code`
+        if (c == '`' as char) {
+            return _scanCode()
+        }
+
+        // Strong / Emphasis: ** __ * _
+        if (c == '*' as char || c == '_' as char) {
+            return _scanEmphasis(c)
+        }
+
+        // Strikethrough: ~~text~~
+        if (c == '~' as char && _peek(1) == '~' as char) {
+            _pos += 2  // consume opening ~~
+            return _scanDelimited("~~", MdInline.Strikethrough)
+        }
+
+        // Image: ![alt](src "title")
+        if (c == '!' as char && _peek(1) == '[' as char) {
+            return _scanImage()
+        }
+
+        // Link: [text](href "title")
+        if (c == '[' as char) {
+            return _scanLink()
+        }
+
+        // Inline HTML: <tag ...>
+        if (c == '<' as char) {
+            return _scanInlineHtml()
+        }
+
+        // Escaped character: \X
+        if (c == '\\' as char && !_isAtEnd()) {
+            _advance() // consume backslash
+            var escaped = _advance()
+            return MdInlineNode.text(f"{escaped}")
+        }
+
+        // Plain text — accumulate until the next special character
+        return _scanText()
+    }
+
+    - func _scanText(): !MdInlineNode {
+        var start = _pos
+        while !_isAtEnd() {
+            var c = _peek()
+            if (c == '`' as char || c == '*' as char || c == '_' as char
+                || c == '~' as char || c == '[' as char || c == '!' as char
+                || c == '<' as char || c == '\\' as char || c == '\n' as char
+                || c == ']' as char)
+                break
+            _advance()
+        }
+        return MdInlineNode.text(
+            String(_input.substr(start, <i64>(_pos - start))))
+    }
+
+    - func _scanCode(): !MdInlineNode {
+        // Count opening backticks
+        var start = _pos
+        var n = 0 as u64
+        while (_peek(n) == '`' as char) n++
+        _pos += n
+
+        // Find matching closing run of exactly n backticks
+        var contentStart = _pos
+        while (!_isAtEnd()) {
+            if (_peek() == '`' as char) {
+                var close = 0 as u64
+                while (_peek(close) == '`' as char) close++
+                if (close == n) {
+                    var content = _input.substr(contentStart, <i64>(_pos - contentStart))
+                    _pos += close
+                    // Collapse leading/trailing single spaces per CommonMark spec
+                    var trimmed = content.trim()
+                    if (trimmed.empty()) trimmed = content
+                    return MdInlineNode.code(String(trimmed))
+                }
+            }
+            _advance()
+        }
+        // No closing run found — treat backticks as literal text
+        return MdInlineNode.text(String(_input.substr(start, <i64>(_pos - start))))
+    }
+
+    - func _scanEmphasis(delim: char): !MdInlineNode {
+        var n = 0 as u64
+        while (_peek(n) == delim) n++
+
+        var kind: MdInline
+        var delimStr: string
+        if (n >= 3) {
+            kind = MdInline.StrongEmphasis
+            delimStr = (delim == '*' as char) ? "***" : "___"
+            _pos += 3
+        } else if (n == 2) {
+            kind = MdInline.Strong
+            delimStr = (delim == '*' as char) ? "**" : "__"
+            _pos += 2
+        } else {
+            kind = MdInline.Emphasis
+            delimStr = (delim == '*' as char) ? "*" : "_"
+            _pos += 1
+        }
+
+        return _scanDelimited(delimStr, kind)
+    }
+
+    /// Scan content until `close` is found, parsing inner spans recursively.
+    - func _scanDelimited(close: string, kind: MdInline): !MdInlineNode {
+        var closeStr = __string(close)
+        var node = MdInlineNode(kind)
+        var contentStart = _pos
+
+        while (!_isAtEnd()) {
+            // Check for closing delimiter
+            var matches = true
+            for (const i: 0..closeStr.size()) {
+                if (_peek(i) != closeStr.[<u32>i]) {
+                    matches = false
+                    break
+                }
+            }
+            if (matches) {
+                _pos += closeStr.size()
+                return &&node
+            }
+
+            var child = _next()
+            if (!child.empty())
+                node.addChild(&&child)
+        }
+
+        // Delimiter never closed — return as plain text
+        return MdInlineNode.text(String(_input.substr(contentStart - closeStr.size())))
+    }
+
+    - func _scanLink(): !MdInlineNode {
+        _advance() // consume '['
+        // Collect link text (may contain nested inline spans)
+        var textNode = MdInlineNode(MdInline.Link)
+        while (!_isAtEnd() && _peek() != ']' as char) {
+            var child = _next()
+            if (!child.empty())
+                textNode.addChild(&&child)
+        }
+        if (_isAtEnd())
+            return MdInlineNode.text(String("["))
+
+        _advance() // consume ']'
+
+        // Expect '('
+        if (_peek() != '(' as char)
+            return MdInlineNode.text(String("["))
+
+        _advance() // consume '('
+        var link = _scanLinkDest()
+        textNode.attr("href", &&link.0)
+        if (link.1 != null)
+            textNode.attr("title", &&link.1)
+        return &&textNode
+    }
+
+    - func _scanImage(): !MdInlineNode {
+        _advance() // '!'
+        _advance() // '['
+        var alt = String()
+        while (!_isAtEnd() && _peek() != ']' as char) {
+            alt << _advance()
+        }
+        if (_isAtEnd())
+            return MdInlineNode.text(String("!["))
+
+        _advance() // ']'
+        if (_peek() != '(' as char)
+            return MdInlineNode.text(String("!["))
+
+        _advance() // '('
+        var link = _scanLinkDest()
+        return MdInlineNode.image(&&link.0, &&alt, &&link.1)
+    }
+
+    /// Parse href and optional title from inside `( ... )`.
+    - func _scanLinkDest(): (String, String) {
+        // Skip leading whitespace
+        while (!_isAtEnd() && (_peek() == ' ' as char || _peek() == '\t' as char))
+            _advance()
+
+        // href — delimited by whitespace or ')'
+        var href = String()
+        if (_peek() == '<' as char) {
+            _advance()
+            while (!_isAtEnd() && _peek() != '>' as char && _peek() != '\n' as char)
+                href << _advance()
+            if (_peek() == '>' as char) _advance()
+        } else {
+            var depth = 0
+            while (!_isAtEnd()) {
+                var c = _peek()
+                if (c == '(' as char) { depth++; href << _advance() }
+                else if (c == ')' as char) {
+                    if (depth == 0) break
+                    depth--; href << _advance()
+                }
+                else if (c == ' ' as char || c == '\t' as char || c == '\n' as char) break
+                else href << _advance()
+            }
+        }
+
+        // Optional title: "...", '...', (...)
+        while (!_isAtEnd() && (_peek() == ' ' as char || _peek() == '\t' as char))
+            _advance()
+
+        var title: String = null
+        var open = _peek()
+        if (open == '"' as char || open == '\'' as char || open == '(' as char) {
+            var closeChar = (open == '(' as char) ? ')' as char : open
+            _advance()
+            title = String()
+            while (!_isAtEnd() && _peek() != closeChar && _peek() != '\n' as char)
+                title << _advance()
+            if (_peek() == closeChar) _advance()
+        }
+
+        // Consume closing ')'
+        while (!_isAtEnd() && _peek() != ')' as char) _advance()
+        if (!_isAtEnd()) _advance()
+
+        return (&&href, &&title)
+    }
+
+    - func _scanInlineHtml(): !MdInlineNode {
+        var start = _pos
+        _advance() // '<'
+
+        // Check for valid tag name start (letter or / for closing tag)
+        if (_isAtEnd())
+            return MdInlineNode.text(String("<"))
+
+        var c = _peek()
+        if (c == '/' as char) {
+            _advance()
+            if (_isAtEnd())
+                return MdInlineNode.text(String("<"))
+            c = _peek()
+        }
+
+        // First char of tag name must be a letter
+        if (!((c >= 'a' as char && c <= 'z' as char) || (c >= 'A' as char && c <= 'Z' as char)))
+            return MdInlineNode.text(String("<"))
+
+        _advance()
+
+        // Rest of tag: consume until we hit '>', space, or newline
+        while (!_isAtEnd() && _peek() != '>' as char && _peek() != '\n' as char)
+            _advance()
+        if (!_isAtEnd() && _peek() == '>' as char) {
+            _advance()
+            var raw = String(_input.substr(start, <i64>(_pos - start)))
+            var node = MdInlineNode(MdInline.RawHtml)
+            node.attr("raw", &&raw)
+            return &&node
+        }
+        // Not a valid inline tag — treat as text
+        return MdInlineNode.text(String("<"))
+    }
+}
+
+// -----------------------------------------------------------------------
+// Block parser
+// Consumes the token stream from MdLexer and builds an MdBlockNode tree.
+// -----------------------------------------------------------------------
+
+pub class MdParser {
+    - _source: String           // Own the source for token lifetimes
+    - _tokens: Vector[MdLexToken]
+    - _pos: i32 = 0
+
+    func `init`(input: __string) {
+        _source = String(input)  // Copy once into parser
+        var lexer = MdLexer(_source.__str())  // Lexer creates slices
+        _tokens = lexer.tokenize() catch Vector[MdLexToken]()
+    }
+
+    func parse(): !MdBlockNode {
+        var doc = MdBlockNode.document()
+        while (!_isAtEnd()) {
+            var block = _parseBlock()
+            if (!!block)
+                doc.addBlock(block.move())
+        }
+        return &&doc
+    }
+
+    // ---------------------------------------------------------------
+    // Token navigation
+    // ---------------------------------------------------------------
+
+    - func _isAtEnd(): bool {
+        return (_pos >= <i32>_tokens.size())
+            || (_tokens.[_pos].kind == MdToken.EOF)
+    }
+
+    - func _peek(): &MdLexToken => &_tokens.[_pos]
+
+    - func _peekKind(): MdToken => _tokens.[_pos].kind
+
+    - func _advance(): &MdLexToken {
+        var t = &_tokens.[_pos]
+        if (!_isAtEnd()) _pos++
+        return t
+    }
+
+    - func _expect(kind: MdToken) {
+        if (_peekKind() == kind)
+            _advance()
+    }
+
+    // ---------------------------------------------------------------
+    // Block parsing
+    // ---------------------------------------------------------------
+
+    - func _parseBlock(): !MdBlockNode? {
+        var tok = _peek()
+        var block: MdBlockNode = null
+        switch (tok.kind) {
+            case MdToken.Blank => {
+                _advance()
+                return None[MdBlockNode]()
+            }
+            case MdToken.Heading => {
+                block = _parseHeading()
+                return Some(&&block)
+            }
+            case MdToken.FenceOpen => {
+                block = _parseFencedCode()
+                return Some(&&block)
+            }
+            case MdToken.IndentedCode => {
+                block = _parseIndentedCode()
+                return Some(&&block)
+            }
+            case MdToken.Blockquote => {
+                block = _parseBlockquote()
+                return Some(&&block)
+            }
+            case MdToken.BulletItem => {
+                block = _parseBulletList()
+                return Some(&&block)
+            }
+            case MdToken.OrderedItem => {
+                block = _parseOrderedList()
+                return Some(&&block)
+            }
+            case MdToken.HorizontalRule => {
+                _advance()
+                block = MdBlockNode.hr()
+                return Some(&&block)
+            }
+            case MdToken.TableRow => {
+                block = _parseTable()
+                return Some(&&block)
+            }
+            case MdToken.HtmlBlockOpen => {
+                block = _parseHtmlBlock()
+                return Some(&&block)
+            }
+            case MdToken.Text => {
+                block = _parseParagraph()
+                return Some(&&block)
+            }
+            default => {
+                _advance()
+                return None[MdBlockNode]()
+            }
+        }
+    }
+
+    - func _parseHeading(): !MdBlockNode {
+        var tok = _advance()
+        var node = MdBlockNode.heading(tok.level)
+        _parseInlinesInto(&node, tok.text)
+        return &&node
+    }
+
+    - func _parseParagraph(): !MdBlockNode {
+        // Accumulate consecutive Text lines into one paragraph.
+        // A setext underline immediately after text promotes it to a heading.
+        var buf = String()
+        while (!_isAtEnd() && _peekKind() == MdToken.Text) {
+            if (!buf.empty()) buf << '\n'
+            buf << _advance().text
+        }
+
+        // Setext heading promotion
+        if (_peekKind() == MdToken.SetextUnderline) {
+            var ul = _advance()
+            var node = MdBlockNode.heading(ul.level)
+            _parseInlinesInto(&node, buf.__str())
+            return &&node
+        }
+
+        var node = MdBlockNode.paragraph()
+        _parseInlinesInto(&node, buf.__str())
+        return &&node
+    }
+
+    - func _parseFencedCode(): !MdBlockNode {
+        var open = _advance()  // FenceOpen
+        var lang = open.text
+        var node = MdBlockNode.codeBlock(String(lang))
+
+        // Accumulate CodeLine tokens as a single Text inline
+        var buf = String()
+        while (!_isAtEnd() && _peekKind() == MdToken.CodeLine) {
+            buf << _advance().text
+            buf << '\n'
+        }
+        _expect(MdToken.FenceClose)
+
+        node.addInline(MdInlineNode.text(&&buf))
+        return &&node
+    }
+
+    - func _parseIndentedCode(): !MdBlockNode {
+        var node = MdBlockNode.codeBlock(null as String)
+        var buf = String()
+        while (!_isAtEnd() && _peekKind() == MdToken.IndentedCode) {
+            buf << _advance().text
+            buf << '\n'
+        }
+        node.addInline(MdInlineNode.text(&&buf))
+        return &&node
+    }
+
+    - func _parseBlockquote(): !MdBlockNode {
+        var node = MdBlockNode.blockquote()
+        // Collect all consecutive blockquote lines, re-parse their content
+        var buf = String()
+        while (!_isAtEnd() && _peekKind() == MdToken.Blockquote) {
+            if (!buf.empty()) buf << '\n'
+            buf << _advance().text
+        }
+        // Recursively parse the stripped content
+        var inner = MdParser(buf.__str())
+        var innerDoc = inner.parse() catch MdBlockNode.document()
+        node.setBlocks(innerDoc.takeBlocks())
+        return &&node
+    }
+
+    - func _parseBulletList(): !MdBlockNode {
+        var list = MdBlockNode.bulletList()
+        while (!_isAtEnd() && _peekKind() == MdToken.BulletItem) {
+            var item = MdBlockNode.listItem()
+            var tok = _advance()
+            _parseInlinesInto(&item, tok.text)
+            // Loose items: if followed by blank then another item, parse lazily
+            while (!_isAtEnd() && _peekKind() == MdToken.Blank) {
+                _advance()
+                if (_peekKind() != MdToken.BulletItem) break
+            }
+            list.addBlock(&&item)
+        }
+        return &&list
+    }
+
+    - func _parseOrderedList(): !MdBlockNode {
+        var firstTok = _peek()
+        var list = MdBlockNode.orderedList(firstTok.level)
+        while (!_isAtEnd() && _peekKind() == MdToken.OrderedItem) {
+            var item = MdBlockNode.listItem()
+            var tok = _advance()
+            _parseInlinesInto(&item, tok.text)
+            while (!_isAtEnd() && _peekKind() == MdToken.Blank) {
+                _advance()
+                if (_peekKind() != MdToken.OrderedItem) break
+            }
+            list.addBlock(&&item)
+        }
+        return &&list
+    }
+
+    - func _parseTable(): !MdBlockNode {
+        var table = MdBlockNode.table()
+
+        // First row is always the header
+        var head = MdBlockNode.tableHead()
+        var headRow = MdBlockNode.tableRow()
+        _parseCells(&headRow, _advance().text, true)
+        head.addBlock(&&headRow)
+        table.addBlock(&&head)
+
+        // Skip separator row
+        if (_peekKind() == MdToken.TableSep)
+            _advance()
+
+        // Remaining rows are body
+        if (_peekKind() == MdToken.TableRow) {
+            var body = MdBlockNode.tableBody()
+            while (!_isAtEnd() && _peekKind() == MdToken.TableRow) {
+                var row = MdBlockNode.tableRow()
+                _parseCells(&row, _advance().text, false)
+                body.addBlock(&&row)
+            }
+            table.addBlock(&&body)
+        }
+
+        return &&table
+    }
+
+    - func _parseCells(row: &MdBlockNode, line: __string, header: bool): void {
+        // Split on '|', trim, skip empty leading/trailing cells
+        var parts = split(line, "|")
+        for (const part: parts) {
+            var trimmed = part.0.trim()
+            if (trimmed.empty()) continue
+            var cell = MdBlockNode.tableCell(header)
+            _parseInlinesInto(&cell, trimmed)
+            row.addBlock(&&cell)
+        }
+    }
+
+    - func _parseHtmlBlock(): !MdBlockNode {
+        var raw = String()
+        raw << _advance().text   // HtmlBlockOpen line
+        while (!_isAtEnd() && (_peekKind() == MdToken.HtmlLine)) {
+            raw << '\n'
+            raw << _advance().text
+        }
+        if (_peekKind() == MdToken.HtmlBlockClose)
+            _advance()
+        return MdBlockNode.htmlBlock(&&raw)
+    }
+
+    // ---------------------------------------------------------------
+    // Inline dispatch
+    // ---------------------------------------------------------------
+
+    - func _parseInlinesInto(node: &MdBlockNode, text: __string): void {
+        var ip = InlineParser(text)
+        var inlines = ip.parse() catch Vector[MdInlineNode]()
+        node.setInlines(&&inlines)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — InlineParser
+// ---------------------------------------------------------------------------
+
+test "inline parser - plain text" {
+    var ip = InlineParser("hello world")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.size() == 1)
+    ok!(nodes.[0].kind() == MdInline.Text)
+    ok!(nodes.[0].text().contains("hello world"))
+}
+
+test "inline parser - inline code" {
+    var ip = InlineParser("`code`")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.Code)
+    ok!(nodes.[0].text().contains("code"))
+}
+
+test "inline parser - double-backtick code preserves inner backtick" {
+    var ip = InlineParser("`` a`b ``")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.Code)
+    ok!(nodes.[0].text().contains("a`b"))
+}
+
+test "inline parser - strong star" {
+    var ip = InlineParser("**bold**")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.Strong)
+    ok!(!nodes.[0].children().empty())
+}
+
+test "inline parser - strong underscore" {
+    var ip = InlineParser("__bold__")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.Strong)
+}
+
+test "inline parser - emphasis star" {
+    var ip = InlineParser("*italic*")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.Emphasis)
+}
+
+test "inline parser - emphasis underscore" {
+    var ip = InlineParser("_italic_")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.Emphasis)
+}
+
+test "inline parser - strong emphasis" {
+    var ip = InlineParser("***bold italic***")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.StrongEmphasis)
+}
+
+test "inline parser - strikethrough" {
+    var ip = InlineParser("~~struck~~")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.Strikethrough)
+}
+
+test "inline parser - link href" {
+    var ip = InlineParser("[text](https://example.com)")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.Link)
+    var href = nodes.[0].attr("href")
+    ok!(!!href && href&.getString().contains("https://example.com"))
+}
+
+test "inline parser - link with title" {
+    var ip = InlineParser("[text](https://example.com \"My Title\")")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.Link)
+    var title = nodes.[0].attr("title")
+    ok!(!!title && title&.getString().contains("My Title"))
+}
+
+test "inline parser - link children contain text" {
+    var ip = InlineParser("[click me](https://example.com)")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.Link)
+    ok!(!nodes.[0].children().empty())
+}
+
+test "inline parser - image src and alt" {
+    var ip = InlineParser("![alt text](img.png)")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.Image)
+    var alt = nodes.[0].attr("alt")
+    ok!(!!alt && alt&.getString().contains("alt text"))
+    ok!(nodes.[0].text().contains("img.png"))
+}
+
+test "inline parser - image with title" {
+    var ip = InlineParser("![logo](logo.png \"Site Logo\")")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.Image)
+    var title = nodes.[0].attr("title")
+    ok!(!!title && title&.getString().contains("Site Logo"))
+}
+
+test "inline parser - soft break on newline" {
+    var ip = InlineParser("line one\nline two")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    // text, softbreak, text
+    ok!(nodes.size() == 3)
+    ok!(nodes.[1].kind() == MdInline.SoftBreak)
+}
+
+test "inline parser - escaped character" {
+    var ip = InlineParser("\\*not bold\\*")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.Text)
+    ok!(nodes.[0].text().contains("*"))
+}
+
+test "inline parser - inline html tag" {
+    var ip = InlineParser("<br>")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.[0].kind() == MdInline.RawHtml)
+    var raw = nodes.[0].attr("raw")
+    ok!(!!raw && raw&.getString().contains("<br>"))
+}
+
+test "inline parser - mixed content" {
+    var ip = InlineParser("plain **bold** plain")
+    var nodes = ip.parse() catch Vector[MdInlineNode]()
+    ok!(nodes.size() == 3)
+    ok!(nodes.[0].kind() == MdInline.Text)
+    ok!(nodes.[1].kind() == MdInline.Strong)
+    ok!(nodes.[2].kind() == MdInline.Text)
+}
+
+// ---------------------------------------------------------------------------
+// Tests — MdParser (block level)
+// ---------------------------------------------------------------------------
+
+test "parser - document is always the root" {
+    var parser = MdParser("# Hello")
+    var doc = parser.parse() catch MdBlockNode.document()
+    ok!(doc.kind() == MdBlock.Document)
+}
+
+test "parser - atx heading level and text" {
+    var parser = MdParser("## Section Title")
+    var doc = parser.parse() catch MdBlockNode.document()
+    ok!(!doc.blocks().empty())
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(block.kind() == MdBlock.Heading)
+            var level = block.attr("level")
+            ok!(!!level && level&.getInt() == 2)
+        }
+    }
+}
+
+test "parser - paragraph produces paragraph node" {
+    var parser = MdParser("Just a paragraph.")
+    var doc = parser.parse() catch MdBlockNode.document()
+    ok!(!doc.blocks().empty())
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(block.kind() == MdBlock.Paragraph)
+        }
+    }
+}
+
+test "parser - paragraph has inline children" {
+    var parser = MdParser("Hello **world**")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(!block.inlines().empty())
+        }
+    }
+}
+
+test "parser - fenced code block with lang attribute" {
+    var parser = MdParser("```js\nconsole.log(42);\n```")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(block.kind() == MdBlock.CodeBlock)
+            var lang = block.attr("lang")
+            ok!(!!lang && lang&.getString().contains("js"))
+        }
+    }
+}
+
+test "parser - fenced code block without lang" {
+    var parser = MdParser("```\nraw code\n```")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(block.kind() == MdBlock.CodeBlock)
+        }
+    }
+}
+
+test "parser - fenced code block inline content" {
+    var parser = MdParser("```\nfn foo() {}\n```")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(!block.inlines().empty())
+            for (const il, j: block.inlines()) {
+                if (j == 0) {
+                    ok!(il.text().contains("fn foo() {}"))
+                }
+            }
+        }
+    }
+}
+
+test "parser - indented code block" {
+    var parser = MdParser("    indented code here")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(block.kind() == MdBlock.CodeBlock)
+        }
+    }
+}
+
+test "parser - blockquote" {
+    var parser = MdParser("> a quote")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(block.kind() == MdBlock.Blockquote)
+        }
+    }
+}
+
+test "parser - blockquote contains nested blocks" {
+    var parser = MdParser("> a quoted paragraph")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(!block.blocks().empty())
+        }
+    }
+}
+
+test "parser - bullet list node" {
+    var parser = MdParser("- one\n- two\n- three")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(block.kind() == MdBlock.BulletList)
+            ok!(block.blocks().size() == 3)
+        }
+    }
+}
+
+test "parser - bullet list items are ListItem nodes" {
+    var parser = MdParser("- alpha\n- beta")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            for (const item, _: block.blocks()) {
+                ok!(item.kind() == MdBlock.ListItem)
+            }
+        }
+    }
+}
+
+test "parser - ordered list node and start number" {
+    var parser = MdParser("5. fifth\n6. sixth")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(block.kind() == MdBlock.OrderedList)
+            var start = block.attr("start")
+            ok!(!!start && start&.getInt() == 5)
+            ok!(block.blocks().size() == 2)
+        }
+    }
+}
+
+test "parser - horizontal rule" {
+    var parser = MdParser("---")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(block.kind() == MdBlock.HorizontalRule)
+        }
+    }
+}
+
+test "parser - table structure thead and tbody" {
+    var parser = MdParser("| A | B |\n|---|---|\n| 1 | 2 |")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(block.kind() == MdBlock.Table)
+            ok!(block.blocks().size() == 2)
+            for (const child, j: block.blocks()) {
+                if (j == 0) {
+                    ok!(child.kind() == MdBlock.TableHead)
+                }
+                if (j == 1) {
+                    ok!(child.kind() == MdBlock.TableBody)
+                }
+            }
+        }
+    }
+}
+
+test "parser - table header row contains cells" {
+    var parser = MdParser("| Name | Age |\n|------|-----|\n| Alice | 30 |")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            for (const section, j: block.blocks()) {
+                if (j == 0) {
+                    // thead -> row -> cells
+                    ok!(!section.blocks().empty())
+                    for (const row, _: section.blocks()) {
+                        ok!(row.kind() == MdBlock.TableRow)
+                        ok!(row.blocks().size() == 2)
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "parser - setext h1 promotion" {
+    var parser = MdParser("Title\n=====")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(block.kind() == MdBlock.Heading)
+            var level = block.attr("level")
+            ok!(!!level && level&.getInt() == 1)
+        }
+    }
+}
+
+test "parser - setext h2 promotion" {
+    var parser = MdParser("Subtitle\n--")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(block.kind() == MdBlock.Heading)
+            var level = block.attr("level")
+            ok!(!!level && level&.getInt() == 2)
+        }
+    }
+}
+
+test "parser - multiple blocks in document" {
+    var parser = MdParser("# Heading\n\nParagraph text")
+    var doc = parser.parse() catch MdBlockNode.document()
+    ok!(doc.blocks().size() == 2)
+    for (const block, i: doc.blocks()) {
+        if (i == 0) { ok!(block.kind() == MdBlock.Heading) }
+        if (i == 1) { ok!(block.kind() == MdBlock.Paragraph) }
+    }
+}
+
+test "parser - html block node" {
+    var parser = MdParser("<div>\ncontent\n</div>")
+    var doc = parser.parse() catch MdBlockNode.document()
+    for (const block, i: doc.blocks()) {
+        if (i == 0) {
+            ok!(block.kind() == MdBlock.HtmlBlock)
+            var raw = block.attr("raw")
+            ok!(!!raw && raw&.getString().contains("<div>"))
+        }
+    }
+}
+
+test "parser - blank lines do not produce blocks" {
+    var parser = MdParser("\n\n\n")
+    var doc = parser.parse() catch MdBlockNode.document()
+    ok!(doc.blocks().empty())
+}
