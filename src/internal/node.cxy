@@ -23,7 +23,7 @@ pub struct Attribute {
     /// Returns the string value, or "" for non-string attributes.
     func getString(): __string {
         match (_value) {
-            case String as val => return val.__str()
+            case String as val => return val == null ? "".s : val.__str()
             ...            => return "".s
         }
     }

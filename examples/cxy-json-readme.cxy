@@ -1,0 +1,141 @@
+import { Markdown } from "../index.cxy"
+
+func main(): !void {
+    var md = Markdown()
+    var out = String()
+
+    var readme = """# cxy-json
+
+A fast, zero-allocation JSON parser and serializer for the Cxy programming language.
+
+## Features
+
+- **Zero allocation parsing** — parses JSON directly into Cxy structs without intermediate heap allocations
+- **Type-safe serialization** — serialize any Cxy struct or class annotated with `@json` to JSON
+- **Streaming support** — parse large JSON documents incrementally without loading them fully into memory
+- **Error messages** — human-readable parse errors with line and column numbers
+- **Full JSON spec** — supports all JSON types: objects, arrays, strings, numbers, booleans, and null
+- **Comptime codegen** — serializer and deserializer code is generated at compile time, zero runtime overhead
+
+## Installation
+
+```sh
+cxy package add cxy-json
+```
+
+## Quick Start
+
+### Parsing JSON into a struct
+
+```cxy
+import { parse } from "@cxy-json"
+
+@json
+struct User {
+    id:    i64 = 0
+    name:  String = null
+    email: String = null
+    admin: bool = false
+}
+
+var user = parse[User]("{\"id\": 1, \"name\": \"Alice\", \"email\": \"alice@example.com\"}")
+println(user.name)   // Alice
+println(user.admin)  // false
+```
+
+### Serializing a struct to JSON
+
+```cxy
+import { toJSON } from "@cxy-json"
+
+@json
+struct Point {
+    x: f64 = 0.0
+    y: f64 = 0.0
+}
+
+var p = Point{ x: 3.14, y: 2.71 }
+println(toJSON(&p))  // {"x":3.14,"y":2.71}
+```
+
+### Optional fields
+
+Annotate fields with `@json(optional: true)` to omit them from output when null:
+
+```cxy
+@json
+struct Article {
+    title:   String = null
+    body:    String = null
+    @json(optional: true)
+    summary: String = null   // omitted if null
+}
+```
+
+### Streaming parser
+
+For large documents, use the streaming API to process tokens incrementally:
+
+```cxy
+import { JsonStream } from "@cxy-json"
+
+var stream = JsonStream(largeJsonString)
+while stream.next() {
+    match stream.token() {
+        JsonString as s => println("string: ", s)
+        JsonNumber as n => println("number: ", n)
+        JsonBool   as b => println("bool: ", b)
+        ... => { }
+    }
+}
+```
+
+## API Reference
+
+### `parse[T](json: __string): !T`
+
+Parses a JSON string into a value of type `T`. Raises `JsonParseError` on malformed input.
+
+### `toJSON[T](value: &T): String`
+
+Serializes a value of type `T` to a JSON `String`. The type must be annotated with `@json`.
+
+### `JsonStream`
+
+Incremental JSON tokenizer for streaming use cases.
+
+| Method | Description |
+|--------|-------------|
+| `next(): bool` | Advance to the next token. Returns false at end of input. |
+| `token(): JsonToken` | Return the current token (union type). |
+| `line(): i32` | Current line number (1-based). |
+| `column(): i32` | Current column number (1-based). |
+
+## Error Handling
+
+```cxy
+var result = parse[User](maybeInvalidJson) catch {
+    println("Parse failed: ", ex!.what())
+    yield User{}
+}
+```
+
+## Benchmarks
+
+| Operation | cxy-json | naive impl |
+|-----------|----------|------------|
+| Parse 1 MB JSON | 2.1 ms | 18.4 ms |
+| Serialize 10k structs | 0.8 ms | 6.2 ms |
+| Memory allocated | 0 bytes | ~4 MB |
+
+## License
+
+MIT — see [LICENSE](LICENSE) for details.
+"""
+
+    md.toHtml(&out, __string(readme))
+
+    println("=== Rendered HTML ===")
+    println(out)
+    println("=== Done ===")
+}

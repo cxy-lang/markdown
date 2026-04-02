@@ -65,9 +65,14 @@ class InlineParser {
         }
 
         // Strikethrough: ~~text~~
-        if (c == '~' as char && _peek(1) == '~' as char) {
-            _pos += 2  // consume opening ~~
-            return _scanDelimited("~~", MdInline.Strikethrough)
+        if (c == '~' as char) {
+            if (_peek(1) == '~' as char) {
+                _pos += 2  // consume opening ~~
+                return _scanDelimited("~~", MdInline.Strikethrough)
+            }
+            // Lone ~ — not strikethrough, consume as plain text
+            _advance()
+            return MdInlineNode.text("~".S)
         }
 
         // Image: ![alt](src "title")
@@ -101,7 +106,8 @@ class InlineParser {
         while !_isAtEnd() {
             var c = _peek()
             if (c == '`' as char || c == '*' as char || c == '_' as char
-                || c == '~' as char || c == '[' as char || c == '!' as char
+                || c == '~' as char && _peek(1) == '~' as char
+                || c == '[' as char || c == '!' as char
                 || c == '<' as char || c == '\\' as char || c == '\n' as char
                 || c == ']' as char)
                 break

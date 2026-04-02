@@ -335,20 +335,22 @@ pub class MdRenderer {
             }
             case MdInline.Link => {
                 var hrefOpt  = node.attr("href")
+                var href     = !!hrefOpt? hrefOpt&.getString() : "".s
                 var titleOpt = node.attr("title")
-                if (!!titleOpt && !titleOpt&.getString().empty()) {
+                var title    = !!titleOpt? titleOpt&.getString() : "".s
+                if !title.empty() {
                     _os << "<a class=\""
                         << MK_A
                         << "\" href=\""
-                        << hrefOpt&.getString()
+                        << href
                         << "\" title=\""
-                        << titleOpt&.getString()
+                        << title
                         << "\">"
                 } else {
                     _os << "<a class=\""
                         << MK_A
                         << "\" href=\""
-                        << hrefOpt&.getString()
+                        << href
                         << "\">"
                 }
                 for child: node.children() {
