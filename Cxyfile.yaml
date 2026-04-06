@@ -1,33 +1,33 @@
 package:
   name: markdown
-  version: 0.1.0
+  version: 0.1.1
   author: n
   description: n
   license: MIT
-
-dependencies: []
-
-tests:
-  - file: "src/**/*.cxy"
 
 builds:
   example-markdown:
     entry: examples/markdown.cxy
     output: markdown
 
+dependencies: []
+
+tests:
+  - file: "src/**/*.cxy"
+
 scripts:
   build-examples:
     inputs:
       - examples/markdown.cxy
-      - src/**/*.cxy
+      - "src/**/*.cxy"
     outputs:
       - "{{BUILD_DIR}}/markdown"
     command: cxy package build example-markdown
-
   run-examples:
-    depends: [build-examples]
+    depends: [ build-examples ]
     command: |
       (
         cd {{BUILD_DIR}}
         ./markdown
       )
+
