@@ -107,7 +107,7 @@ class InlineParser {
             var c = _peek()
             if (c == '`' as char || c == '*' as char || c == '_' as char
                 || c == '~' as char && _peek(1) == '~' as char
-                || c == '[' as char || c == '!' as char
+                || c == '[' as char || c == '!' as char && _peek(1) == '[' as char
                 || c == '<' as char || c == '\\' as char || c == '\n' as char
                 || c == ']' as char)
                 break

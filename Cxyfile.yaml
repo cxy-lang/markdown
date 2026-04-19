@@ -24,10 +24,9 @@ scripts:
       - "{{BUILD_DIR}}/markdown"
     command: cxy package build example-markdown
   run-examples:
-    depends: [ build-examples ]
+    depends: [build-examples]
     command: |
       (
         cd {{BUILD_DIR}}
         ./markdown
       )
-
