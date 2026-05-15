@@ -363,7 +363,8 @@ pub class MdRenderer {
                 var altOpt   = node.attr("alt")
                 var titleOpt = node.attr("title")
                 var alt   = !!altOpt   ? altOpt&.getString()   : "".s
-                if (!!titleOpt && !titleOpt&.getString().empty()) {
+                var title = !!titleOpt ? titleOpt&.getString() : "".s
+                if (!title.empty()) {
                     _os << "<img class=\""
                         << MK_IMG
                         << "\" src=\""
