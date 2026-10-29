@@ -348,8 +348,8 @@ pub class MdParser {
         var doc = MdBlockNode.document()
         while (!_isAtEnd()) {
             var block = _parseBlock()
-            if (!!block)
-                doc.addBlock(block.move())
+            if (block)
+                doc.addBlock(&&*block)
         }
         return &&doc
     }
@@ -388,52 +388,42 @@ pub class MdParser {
         switch (tok.kind) {
             case MdToken.Blank => {
                 _advance()
-                return None[MdBlockNode]()
+                return null
             }
             case MdToken.Heading => {
-                block = _parseHeading()
-                return Some(&&block)
+                return _parseHeading()
             }
             case MdToken.FenceOpen => {
-                block = _parseFencedCode()
-                return Some(&&block)
+                return _parseFencedCode()
             }
             case MdToken.IndentedCode => {
-                block = _parseIndentedCode()
-                return Some(&&block)
+                return _parseIndentedCode()
             }
             case MdToken.Blockquote => {
-                block = _parseBlockquote()
-                return Some(&&block)
+                return _parseBlockquote()
             }
             case MdToken.BulletItem => {
-                block = _parseBulletList()
-                return Some(&&block)
+                return _parseBulletList()
             }
             case MdToken.OrderedItem => {
-                block = _parseOrderedList()
-                return Some(&&block)
+                return _parseOrderedList()
             }
             case MdToken.HorizontalRule => {
                 _advance()
-                block = MdBlockNode.hr()
-                return Some(&&block)
+                return MdBlockNode.hr()
             }
             case MdToken.TableRow => {
-                block = _parseTable()
-                return Some(&&block)
+                return _parseTable()
             }
             case MdToken.HtmlBlockOpen => {
-                block = _parseHtmlBlock()
-                return Some(&&block)
+                return _parseHtmlBlock()
             }
             case MdToken.Text => {
-                block = _parseParagraph()
-                return Some(&&block)
+                return _parseParagraph()
             }
             default => {
                 _advance()
-                return None[MdBlockNode]()
+                return null
             }
         }
     }

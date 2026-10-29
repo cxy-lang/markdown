@@ -9,6 +9,8 @@ builds:
   example-markdown:
     entry: examples/markdown.cxy
     output: markdown
+    flags:
+      - '--memory-trace'
 
 dependencies: []
 
@@ -30,4 +32,3 @@ scripts:
         cd {{BUILD_DIR}}
         ./markdown
       )
-

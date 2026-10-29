@@ -133,7 +133,7 @@ pub class MdLexer {
         if (_inFence) {
             if (_isFenceClose(raw)) {
                 _inFence = false
-                _emit(MdToken.FenceClose, null, 0, lineNo)
+                _emit(MdToken.FenceClose, "", 0, lineNo)
             } else {
                 _emit(MdToken.CodeLine, raw, 0, lineNo)
             }
@@ -144,7 +144,7 @@ pub class MdLexer {
         if (_inHtmlBlock) {
             if (_htmlCloseTag != null && raw.contains(_htmlCloseTag.__str())) {
                 _emit(MdToken.HtmlLine, raw, 0, lineNo)
-                _emit(MdToken.HtmlBlockClose, null, 0, lineNo)
+                _emit(MdToken.HtmlBlockClose, "", 0, lineNo)
                 _inHtmlBlock = false
                 _htmlCloseTag = null
             } else {
@@ -157,7 +157,7 @@ pub class MdLexer {
         if (_isBlank(raw)) {
             // Coalesce consecutive blank tokens
             if (!_tokens.empty() && _tokens.[<i32>(_tokens.size() - 1)].kind != MdToken.Blank)
-                _emit(MdToken.Blank, null, 0, lineNo)
+                _emit(MdToken.Blank, "", 0, lineNo)
             return
         }
 
@@ -188,7 +188,7 @@ pub class MdLexer {
 
         // --- Horizontal rule: ---, ***, ___ (3+ chars, only that char + spaces) ---
         if (_isHorizontalRule(raw)) {
-            _emit(MdToken.HorizontalRule, null, 0, lineNo)
+            _emit(MdToken.HorizontalRule, "", 0, lineNo)
             return
         }
 
@@ -222,11 +222,11 @@ pub class MdLexer {
 
         // --- Setext heading underline: === or --- on its own line ---
         if (_isSetextUnderline(raw, '=' as char)) {
-            _emit(MdToken.SetextUnderline, null, 1, lineNo)
+            _emit(MdToken.SetextUnderline, "", 1, lineNo)
             return
         }
         if (_isSetextUnderline(raw, '-' as char)) {
-            _emit(MdToken.SetextUnderline, null, 2, lineNo)
+            _emit(MdToken.SetextUnderline, "", 2, lineNo)
             return
         }
 
@@ -253,7 +253,7 @@ pub class MdLexer {
                 _emit(MdToken.HtmlBlockOpen, raw, 0, lineNo)
                 if (html.1) {
                     // Self-contained (close tag on same line)
-                    _emit(MdToken.HtmlBlockClose, null, 0, lineNo)
+                    _emit(MdToken.HtmlBlockClose, "", 0, lineNo)
                 } else {
                     _inHtmlBlock = true
                     _htmlCloseTag = &&html.2
