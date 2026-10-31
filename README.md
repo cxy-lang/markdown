@@ -95,7 +95,7 @@ Creates a Markdown instance with custom configuration.
 
 #### Methods
 
-##### `toHtml(os: &OutputStream, source: __string): !void`
+##### `toHtml(os: &OutputStream, source: strview): !void`
 
 Parse a Markdown string and write HTML to an output stream. No caching — the string is always re-parsed.
 

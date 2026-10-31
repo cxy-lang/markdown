@@ -11,7 +11,7 @@ import "unistd.h"  as unistd
 // Helpers
 // ---------------------------------------------------------------------------
 
-func fileMtime(path: __string): u64 {
+func fileMtime(path: strview): u64 {
     var s = Stat{}
     if withNullTermination[i32](&path, (p: ^const char) => stat(p !: string, ptrof s)) != 0 {
         return 0`u64
@@ -49,7 +49,7 @@ pub class MdCache {
     /// Return the cache output path for a given source path.
     /// The extension is replaced with .html and the full path
     /// is mirrored under the cache directory.
-    const func outputPath(srcPath: __string): Path {
+    const func outputPath(srcPath: strview): Path {
         // Strip leading '/' so Path./ concatenation works correctly
         var rel = srcPath
         if !rel.empty() && rel.[0] == '/' as char {
@@ -68,9 +68,9 @@ pub class MdCache {
     /// Returns true if the cached HTML for srcPath is still valid:
     ///   - the output file exists, AND
     ///   - its mtime is strictly newer than the source file's mtime.
-    const func isValid(srcPath: __string): bool {
+    const func isValid(srcPath: strview): bool {
         var outPath = outputPath(srcPath)
-        var outStr  = outPath.__str()
+        var outStr  = outPath.s()
 
         if !isfile(outPath) {
             return false
@@ -88,9 +88,9 @@ pub class MdCache {
     }
 
     /// Ensure the directory containing the output path exists.
-    func ensureDir(srcPath: __string): !void {
+    func ensureDir(srcPath: strview): !void {
         var out    = outputPath(srcPath)
-        var outStr = out.__str()
+        var outStr = out.s()
 
         // Find the parent directory
         var sep = outStr.rfind("/")

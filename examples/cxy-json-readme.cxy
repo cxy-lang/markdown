@@ -92,7 +92,7 @@ while stream.next() {
 
 ## API Reference
 
-### `parse[T](json: __string): !T`
+### `parse[T](json: strview): !T`
 
 Parses a JSON string into a value of type `T`. Raises `JsonParseError` on malformed input.
 
@@ -133,7 +133,7 @@ var result = parse[User](maybeInvalidJson) catch {
 MIT — see [LICENSE](LICENSE) for details.
 """
 
-    md.toHtml(&out, __string(readme))
+    md.toHtml(&out, strview(readme))
 
     println("=== Rendered HTML ===")
     println(out)

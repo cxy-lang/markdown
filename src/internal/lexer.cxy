@@ -56,7 +56,7 @@ pub struct MdLexToken {
     /// For Blockquote, the content after '>'.
     /// For CodeLine / IndentedCode, the raw code text.
     /// For TableRow, the full pipe-delimited line.
-    text: __string = null
+    text: strview = null
     /// Auxiliary numeric value:
     ///   Heading      -> heading level (1-6)
     ///   OrderedItem  -> list start number
@@ -68,7 +68,7 @@ pub struct MdLexToken {
 }
 
 pub class MdLexer {
-    _input: __string
+    _input: strview
     _pos: u64 = 0
     _line: u64 = 1
     _tokens = Vector[MdLexToken]()
@@ -78,7 +78,7 @@ pub class MdLexer {
     _inHtmlBlock: bool = false
     _htmlCloseTag: String = null
 
-    func `init`(input: __string) {
+    func `init`(input: strview) {
         _input = input
     }
 
@@ -106,7 +106,7 @@ pub class MdLexer {
 
     /// Read until end-of-line (consuming the \n) and return the raw line
     /// including any trailing \r but excluding the final \n.
-    func _readLine(): __string {
+    func _readLine(): strview {
         var start = _pos
         while (_pos < _input.size() && _input.[<u32>_pos] != '\n' as char) {
             _pos++
@@ -123,12 +123,12 @@ pub class MdLexer {
     }
 
     /// Emit a token.
-    func _emit(kind: MdToken, text: __string, level: u32, lineNo: u64) {
+    func _emit(kind: MdToken, text: strview, level: u32, lineNo: u64) {
         _tokens.push(MdLexToken{kind: kind, text: &&text, level: level, line: lineNo})
     }
 
     /// Main dispatcher: classify one raw line.
-    func _classifyLine(raw: __string, lineNo: u64): !void {
+    func _classifyLine(raw: strview, lineNo: u64): !void {
         // --- Inside a fenced code block ---
         if (_inFence) {
             if (_isFenceClose(raw)) {
@@ -142,7 +142,7 @@ pub class MdLexer {
 
         // --- Inside a raw HTML block ---
         if (_inHtmlBlock) {
-            if (_htmlCloseTag != null && raw.contains(_htmlCloseTag.__str())) {
+            if (_htmlCloseTag != null && raw.contains(_htmlCloseTag.s())) {
                 _emit(MdToken.HtmlLine, raw, 0, lineNo)
                 _emit(MdToken.HtmlBlockClose, "", 0, lineNo)
                 _inHtmlBlock = false
@@ -270,7 +270,7 @@ pub class MdLexer {
     // Classification helpers
     // ---------------------------------------------------------------
 
-    const func _isBlank(s: __string): bool {
+    const func _isBlank(s: strview): bool {
         for (const i: 0..s.size()) {
             var c = s.[<u32>i]
             if (c != ' ' as char && c != '\t' as char && c != '\r' as char)
@@ -280,7 +280,7 @@ pub class MdLexer {
     }
 
     /// Count leading occurrences of `ch` in s.
-    const func _countLeading(s: __string, ch: char): u32 {
+    const func _countLeading(s: strview, ch: char): u32 {
         var n = 0 as u32
         while (n < s.size() && s.[n] == ch)
             n++
@@ -288,7 +288,7 @@ pub class MdLexer {
     }
 
     /// Strip trailing #+ and whitespace from ATX heading content.
-    const func _trimHeading(s: __string): __string {
+    const func _trimHeading(s: strview): strview {
         var trimmed = s.trim()
         // Remove trailing #s used as closing markers
         var end = trimmed.size()
@@ -304,7 +304,7 @@ pub class MdLexer {
     }
 
     /// Returns (fenceLen, fenceChar, lang) or (0, _, "") if not a fence.
-    const func _detectFence(s: __string): (u32, char, __string) {
+    const func _detectFence(s: strview): (u32, char, strview) {
         var trimmed = s.trim()
         if (trimmed.size() < 3)
             return (0`u32, '\0' as char, "".s)
@@ -318,7 +318,7 @@ pub class MdLexer {
         return (n, ch, lang)
     }
 
-    const func _isFenceClose(s: __string): bool {
+    const func _isFenceClose(s: strview): bool {
         var trimmed = s.trim()
         if (trimmed.size() < _fenceLen)
             return false
@@ -326,7 +326,7 @@ pub class MdLexer {
         return n >= _fenceLen && trimmed.substr(<u64>n).trim().empty()
     }
 
-    const func _isHorizontalRule(s: __string): bool {
+    const func _isHorizontalRule(s: strview): bool {
         var trimmed = s.trim()
         if (trimmed.size() < 3)
             return false
@@ -344,7 +344,7 @@ pub class MdLexer {
         return nonSpace >= 3
     }
 
-    const func _bulletMarker(s: __string): char {
+    const func _bulletMarker(s: strview): char {
         if (s.size() < 2)
             return '\0' as char
         var ch = s.[0]
@@ -355,7 +355,7 @@ pub class MdLexer {
     }
 
     /// Returns (start-number, content) or (0, "") if not an ordered item.
-    const func _orderedMarker(s: __string): (u32, __string) {
+    const func _orderedMarker(s: strview): (u32, strview) {
         var i = 0 as u32
         while (i < s.size() && s.[i] >= '0' as char && s.[i] <= '9' as char)
             i++
@@ -376,7 +376,7 @@ pub class MdLexer {
         return (num, s.substr(<u64>i))
     }
 
-    const func _isSetextUnderline(s: __string, ch: char): bool {
+    const func _isSetextUnderline(s: strview, ch: char): bool {
         var trimmed = s.trim()
         if (trimmed.size() < 2)
             return false
@@ -387,7 +387,7 @@ pub class MdLexer {
         return true
     }
 
-    const func _isIndentedCode(s: __string): bool {
+    const func _isIndentedCode(s: strview): bool {
         if (s.size() >= 4
             && s.[0] == ' ' as char
             && s.[1] == ' ' as char
@@ -399,13 +399,13 @@ pub class MdLexer {
         return false
     }
 
-    const func _isTableRow(s: __string): bool {
+    const func _isTableRow(s: strview): bool {
         var trimmed = s.trim()
         return !trimmed.empty()
             && (trimmed.[0] == '|' as char || trimmed.[<u32>(trimmed.size() - 1)] == '|' as char)
     }
 
-    const func _isTableSep(s: __string): bool {
+    const func _isTableSep(s: strview): bool {
         var trimmed = s.trim()
         for (const i: 0..trimmed.size()) {
             var c = trimmed.[<u32>i]
@@ -417,7 +417,7 @@ pub class MdLexer {
     }
 
     /// Returns (isHtmlBlock, selfContained, expectedCloseTag).
-    const func _detectHtmlBlock(s: __string): (bool, bool, String) {
+    const func _detectHtmlBlock(s: strview): (bool, bool, String) {
         var trimmed = s.trim()
         if (trimmed.size() < 2 || trimmed.[0] != '<' as char)
             return (false, false, null as String)
@@ -461,7 +461,7 @@ pub class MdLexer {
 
         // Check if close tag is on the same line
         var closeTag = f"</{tagName}>"
-        var selfContained = trimmed.contains(closeTag.__str())
+        var selfContained = trimmed.contains(closeTag.s())
 
         return (true, selfContained, &&closeTag)
     }

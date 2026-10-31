@@ -12,10 +12,10 @@ import { MarkdownError, MdInline, MdBlock } from "./common.cxy"
 // -----------------------------------------------------------------------
 
 class InlineParser {
-    - _input: __string
+    - _input: strview
     - _pos: u64 = 0
 
-    func `init`(input: __string) {
+    func `init`(input: strview) {
         _input = input
     }
 
@@ -170,7 +170,7 @@ class InlineParser {
 
     /// Scan content until `close` is found, parsing inner spans recursively.
     - func _scanDelimited(close: string, kind: MdInline): !MdInlineNode {
-        var closeStr = __string(close)
+        var closeStr = strview(close)
         var node = MdInlineNode(kind)
         var contentStart = _pos
 
@@ -338,9 +338,9 @@ pub class MdParser {
     - _tokens: Vector[MdLexToken]
     - _pos: i32 = 0
 
-    func `init`(input: __string) {
+    func `init`(input: strview) {
         _source = String(input)  // Copy once into parser
-        var lexer = MdLexer(_source.__str())  // Lexer creates slices
+        var lexer = MdLexer(_source.s())  // Lexer creates slices
         _tokens = lexer.tokenize() catch Vector[MdLexToken]()
     }
 
@@ -448,12 +448,12 @@ pub class MdParser {
         if (_peekKind() == MdToken.SetextUnderline) {
             var ul = _advance()
             var node = MdBlockNode.heading(ul.level)
-            _parseInlinesInto(&node, buf.__str())
+            _parseInlinesInto(&node, buf.s())
             return &&node
         }
 
         var node = MdBlockNode.paragraph()
-        _parseInlinesInto(&node, buf.__str())
+        _parseInlinesInto(&node, buf.s())
         return &&node
     }
 
@@ -494,7 +494,7 @@ pub class MdParser {
             buf << _advance().text
         }
         // Recursively parse the stripped content
-        var inner = MdParser(buf.__str())
+        var inner = MdParser(buf.s())
         var innerDoc = inner.parse() catch MdBlockNode.document()
         node.setBlocks(innerDoc.takeBlocks())
         return &&node
@@ -560,7 +560,7 @@ pub class MdParser {
         return &&table
     }
 
-    - func _parseCells(row: &MdBlockNode, line: __string, header: bool): void {
+    - func _parseCells(row: &MdBlockNode, line: strview, header: bool): void {
         // Split on '|', trim, skip empty leading/trailing cells
         var parts = split(line, "|")
         for (const part: parts) {
@@ -588,7 +588,7 @@ pub class MdParser {
     // Inline dispatch
     // ---------------------------------------------------------------
 
-    - func _parseInlinesInto(node: &MdBlockNode, text: __string): void {
+    - func _parseInlinesInto(node: &MdBlockNode, text: strview): void {
         var ip = InlineParser(text)
         var inlines = ip.parse() catch Vector[MdInlineNode]()
         node.setInlines(&&inlines)

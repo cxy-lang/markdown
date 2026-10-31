@@ -21,9 +21,9 @@ pub struct Attribute {
     }
 
     /// Returns the string value, or "" for non-string attributes.
-    func getString(): __string {
+    func getString(): strview {
         match (_value) {
-            case String as val => return val == null ? "".s : val.__str()
+            case String as val => return val == null ? "".s : val.s()
             ...            => return "".s
         }
     }
@@ -85,7 +85,7 @@ pub class MdInlineNode {
     const func kind() => _kind
 
     @inline
-    const func text() => _text != null? _text.__str() : "".s
+    const func text() => _text != null? _text.s() : "".s
 
     @inline
     func attr(key: string, value: String) {

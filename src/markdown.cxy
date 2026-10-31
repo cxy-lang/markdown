@@ -57,7 +57,7 @@ pub class Markdown {
     /// Example:
     ///   var md = Markdown()
     ///   md.toHtml(&response, "# Hello\nWorld".s)
-    func toHtml(os: &OutputStream, source: __string): !void {
+    func toHtml(os: &OutputStream, source: strview): !void {
         var parser   = MdParser(source)
         var doc      = parser.parse()
         var renderer = MdRenderer(os)
@@ -74,11 +74,11 @@ pub class Markdown {
     /// Example:
     ///   md.toHtml(&response, Path("docs/guide.md"))
     func toHtml(os: &OutputStream, path: PathLike): !void {
-        var spath = cast[__string](&path)
+        var spath = cast[strview](&path)
         var fis   = FileInputStream.open(spath.str(), _config.nonBlocking)
         var content = String()
         fis.readAll(&content)
-        var parser   = MdParser(content.__str())
+        var parser   = MdParser(content.s())
         var doc      = parser.parse()
         var renderer = MdRenderer(os)
         renderer.render(&doc)
@@ -98,7 +98,7 @@ pub class Markdown {
     ///   var htmlPath = md.toHtml(Path("docs/guide.md"))
     ///   // => Path(".markdown/docs/guide.html")
     func toHtml(path: PathLike): !Path {
-        var spath = cast[__string](&path)
+        var spath = cast[strview](&path)
 
         // Fast path: cached output is still valid
         if (!_config.noCache && _cache.isValid(spath)) {
@@ -109,7 +109,7 @@ pub class Markdown {
         _cache.ensureDir(spath)
 
         var outPath = _cache.outputPath(spath)
-        var outStr  = outPath.__str()
+        var outStr  = outPath.s()
 
         // Open output file (truncate), stream rendered HTML directly into it.
         // FileOutputStream IS an OutputStream so we pass it straight through.
@@ -234,7 +234,7 @@ test "toHtml - table" {
 | Alice | 30 |
 | Bob   | 25 |"""
     var out = String()
-    md.toHtml(&out, __string(input))
+    md.toHtml(&out, strview(input))
     ok!(out.contains("<table class=\"mk-table\">"))
     ok!(out.contains("<thead class=\"mk-thead\">"))
     ok!(out.contains("<tbody class=\"mk-tbody\">"))
@@ -328,6 +328,6 @@ End of document."""
 """
 
     var out = String()
-    md.toHtml(&out, __string(input))
+    md.toHtml(&out, strview(input))
     ok!(out == expected)
 }
