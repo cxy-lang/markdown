@@ -1,6 +1,6 @@
 package:
   name: markdown
-  version: 0.2.0
+  version: 0.2.1
   author: Carter Mbotho<lastcarter@gmail.com>
   description: Markdown to HTML parser for Cxy with CommonMark support, file caching, and semantic mk-* CSS class output
   license: MIT
